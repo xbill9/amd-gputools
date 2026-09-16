@@ -289,6 +289,54 @@ class GPUStatusExitCodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.startswith("❌"), result)
 
 
+class HardwareScanTests(unittest.IsolatedAsyncioTestCase):
+    """Counting GPUs is code's job, and the obvious match double-counts."""
+
+    SCAN = (
+        "<<<host>>>\nbox\n6.12\nDebian 13\nup 3 minutes\nXeon\n20\n236 GB\n679G\n"
+        "<<<kfd>>>\npresent\nloaded\n-\n"
+        "<<<pci>>>\n83:00.0 Instinct MI300X VF\n"
+        "<<<agents>>>\n  Name:   INTEL XEON\n  Marketing Name:  INTEL XEON\n"
+        "  Name:   gfx942\n  Marketing Name:  AMD Instinct MI300X VF\n"
+        "  Name:   amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-\n"
+        "<<<vram>>>\ncard0,205822885888,299687936\n"
+        "<<<firmware>>>\nGPU[0] : VBIOS version: 113-M3000108-103\n"
+        "<<<tools>>>\nrocm-smi\t/usr/bin/rocm-smi\ndocker\t-\nhipcc\t-\n"
+        "<<<versions>>>\nPython 3.13.5\n"
+        "<<<packages>>>\nrocm-smi\t6.1.2-1\n"
+        "<<<python>>>\nModuleNotFoundError: No module named 'torch'\n"
+    )
+
+    async def _scan(self, raw):
+        async def fake_run_command(cmd, timeout=120):
+            return (0, raw, "")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.hardware_scan("mi300-1")
+
+    async def test_one_gpu_is_counted_once(self):
+        """rocminfo's ISA line reuses the `Name:` key and must not count as an agent."""
+        result = await self._scan(self.SCAN)
+        self.assertIn("1 GPU agent(s)", result)
+        self.assertNotIn("2 GPU agent(s)", result)
+        self.assertIn("`gfx942`", result)
+        self.assertNotIn("`amdgcn-amd-amdhsa", result)
+
+    async def test_missing_tools_are_counted_and_named(self):
+        result = await self._scan(self.SCAN)
+        self.assertIn("missing (2)", result)
+        self.assertIn("`docker`", result)
+
+    async def test_absent_kfd_is_flagged_as_fatal(self):
+        result = await self._scan(self.SCAN.replace("<<<kfd>>>\npresent", "<<<kfd>>>\nABSENT"))
+        self.assertIn("ROCm cannot work", result)
+
+    async def test_empty_output_is_an_error_not_an_empty_report(self):
+        result = await self._scan("")
+        self.assertTrue(result.startswith("❌"), result)
+
+
 class RegistrationTests(unittest.TestCase):
     """The server key prefixes every tool name, so the four places must agree."""
 

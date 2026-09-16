@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -376,6 +377,35 @@ async def stop_droplet(droplet: str, graceful: bool = True) -> str:
         return _error(exc)
 
 
+@mcp.tool(title="Reboot droplet", annotations=DESTRUCTIVE)
+async def reboot_droplet(droplet: str) -> str:
+    """Reboot a tagged droplet.
+
+    THIS IS THE FIX FOR A FRESHLY PROVISIONED GPU DROPLET. MEASURED 2026-09-16
+    on debian-gpu-mi300x1-192gb-devcloud-atl1: straight after provisioning
+    /dev/kfd did not exist, amdgpu had failed to bind the MI300X VF and
+    unloaded itself, and the card was visible to lspci while being unusable by
+    anything. One reboot brought up /dev/kfd and the GPU reported normally. No
+    driver installation was involved. Reach for this before debugging ROCm.
+
+    Sends the API `reboot` action, which is a graceful restart. Anything
+    running on the droplet dies with it, and the public IP is unchanged.
+    """
+    try:
+        item = await _resolve(droplet)
+        if item.get("status") != "active":
+            return f"❌ `{item.get('name')}` is `{item.get('status')}`, not active. Use `start_droplet` instead."
+        body = await _api("POST", f"/droplets/{item['id']}/actions", {"type": "reboot"})
+        action = body.get("action", {})
+        return (
+            f"📡 Rebooting `{item.get('name')}` (`{item['id']}`). Action `{action.get('id')}` is "
+            f"`{action.get('status')}`.\n\nPoll `action_status`; SSH came back about 20s after the "
+            f"action completed when this was measured. Then check `gpu_status`."
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
 @mcp.tool(title="Check action status", annotations=READ_ONLY)
 async def action_status(action_id: str) -> str:
     """Poll a droplet action returned by start_droplet or stop_droplet."""
@@ -526,6 +556,169 @@ async def gpu_status(droplet: str) -> str:
             f"❌ No GPU reported on `{item.get('name')}` — and note both tools exited 0 while failing.\n\n"
             f"```\n{complaint[:800]}\n```\n\n{diagnosis}"
         )
+    except Exception as exc:
+        return _error(exc)
+
+
+# One remote script, one round trip. Each section is fenced by a marker so the
+# parsing below never has to guess where an unfamiliar tool's output ended. Every
+# probe is guarded: a missing tool prints "-" rather than failing the whole scan,
+# because the interesting case is exactly the droplet where half of this is absent.
+_SCAN_SCRIPT = r"""
+say() { printf '<<<%s>>>\n' "$1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+say host
+hostname; uname -r; (. /etc/os-release && echo "$PRETTY_NAME"); uptime -p
+awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo
+nproc
+awk '/MemTotal/{printf "%.0f GB\n", $2/1048576}' /proc/meminfo
+df -h --output=avail / | tail -1
+
+say kfd
+test -e /dev/kfd && echo present || echo ABSENT
+lsmod | awk '$1=="amdgpu"{print "loaded"; found=1} END{if(!found) print "NOT loaded"}'
+cat /sys/module/amdgpu/version 2>/dev/null || echo -
+
+say pci
+lspci -nn 2>/dev/null | grep -iE 'processing accelerator|vga|display' || echo -
+
+say agents
+have rocminfo && rocminfo 2>/dev/null | grep -E '^\s*(Name|Marketing Name|Compute Unit|Uuid):' || echo -
+
+say vram
+have rocm-smi && rocm-smi --showmeminfo vram --csv 2>/dev/null | grep -i '^card' || echo -
+
+say firmware
+have rocm-smi && rocm-smi --showfw 2>/dev/null | grep -iE '^GPU|FW version|VBIOS' | head -40 || echo -
+have rocm-smi && rocm-smi --showvbios 2>/dev/null | grep -i vbios | head -4 || echo -
+
+say tools
+for t in rocm-smi rocminfo amd-smi hipcc clinfo docker podman python3 pip3 git tmux; do
+  if have "$t"; then printf '%s\t%s\n' "$t" "$(command -v $t)"; else printf '%s\t-\n' "$t"; fi
+done
+
+say versions
+have rocm-smi && rocm-smi --version 2>/dev/null | head -2 || echo -
+have hipcc && hipcc --version 2>/dev/null | head -2 || echo -
+have docker && docker --version 2>/dev/null || echo -
+have python3 && python3 --version || echo -
+ls -d /opt/rocm* 2>/dev/null || echo "no /opt/rocm"
+
+say packages
+dpkg -l 2>/dev/null | awk '/amdgpu|rocm|hsa|hip/ {print $2"\t"$3}' | head -25
+
+say python
+have python3 && python3 -c "import torch;print('torch',torch.__version__,'hip',getattr(torch.version,'hip',None),'avail',torch.cuda.is_available())" 2>&1 | tail -1 || echo -
+have python3 && python3 -c "import vllm;print('vllm',vllm.__version__)" 2>&1 | tail -1 || echo -
+"""
+
+
+def _sections(raw: str) -> dict:
+    """Split the scan output on its <<<marker>>> fences."""
+    out: dict = {}
+    current = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("<<<") and stripped.endswith(">>>"):
+            current = stripped[3:-3]
+            out[current] = []
+        elif current:
+            out[current].append(line.rstrip())
+    return {k: [ln for ln in v if ln.strip()] for k, v in out.items()}
+
+
+@mcp.tool(title="Scan hardware, firmware and tooling", annotations=READ_ONLY)
+async def hardware_scan(droplet: str) -> str:
+    """Inventory a droplet: host, GPU, firmware, ROCm packages and installed tools.
+
+    One SSH round trip. Answers the questions that decide what can be deployed
+    on a box — is /dev/kfd there, which gfx target, how much VRAM, is docker
+    installed, is there a /opt/rocm, is torch built for HIP — without needing a
+    separate call per question.
+    """
+    try:
+        item = await _resolve(droplet)
+        ip, why_not = await _reachable(item)
+        if why_not:
+            return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
+
+        code, out, err = await run_command(_ssh_argv(ip, _SCAN_SCRIPT), timeout=180)
+        sec = _sections(out)
+        if not sec:
+            return f"❌ Scan returned nothing from `{item.get('name')}` (exit {code}).\n\n```\n{err[:600]}\n```"
+
+        def block(name: str) -> list[str]:
+            return sec.get(name, [])
+
+        host = block("host")
+        kfd = block("kfd")
+        lines = [f"# `{item.get('name')}`", ""]
+
+        lines += ["## Host", ""]
+        labels = ["hostname", "kernel", "os", "uptime", "cpu", "cores", "ram", "disk free /"]
+        # strict=False on purpose: a probe that failed leaves `host` short, and a
+        # partial scan is worth printing.
+        for label, value in zip(labels, host, strict=False):
+            lines.append(f"- {label}: {value.strip()}")
+
+        lines += ["", "## GPU", ""]
+        if kfd:
+            lines.append(f"- `/dev/kfd`: **{kfd[0]}**" + ("" if kfd[0] == "present" else "  ← ROCm cannot work"))
+        if len(kfd) > 1:
+            lines.append(f"- amdgpu module: {kfd[1]}")
+        if len(kfd) > 2:
+            lines.append(f"- amdgpu version: {kfd[2]}")
+        for line in block("pci"):
+            lines.append(f"- pci: `{line.strip()}`")
+
+        # rocminfo lists the CPU agent first and the GPU agents after it, so the
+        # gfx targets are counted rather than assumed to be one. The ISA line
+        # ("Name: amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-") uses the same
+        # "Name:" key as the agent line ("Name: gfx942"), so matching on "gfx"
+        # alone double-counts every GPU — measured 2026-09-16, one MI300X
+        # reported as "2 GPU agent(s)". Only a bare gfx<digits> target counts.
+        agents = block("agents")
+        gfx = [
+            value
+            for ln in agents
+            if ln.strip().startswith("Name:")
+            for value in [ln.split(":", 1)[1].strip()]
+            if re.fullmatch(r"gfx[0-9a-f]+", value)
+        ]
+        marketing = [ln.split(":", 1)[1].strip() for ln in agents if "Marketing Name" in ln and "CPU" not in ln]
+        if gfx:
+            lines.append(f"- gfx targets: {', '.join(f'`{g}`' for g in gfx)}  ({len(gfx)} GPU agent(s))")
+        for name in marketing:
+            if "AMD" in name or "Instinct" in name or "Radeon" in name:
+                lines.append(f"- device: {name}")
+                break
+        for line in block("vram"):
+            lines.append(f"- vram: `{line.strip()}`")
+
+        fw = block("firmware")
+        lines += ["", "## Firmware", ""]
+        lines.append(f"```\n{chr(10).join(fw[:30]) if fw else '(none reported)'}\n```")
+
+        lines += ["", "## Tools", ""]
+        present, missing = [], []
+        for line in block("tools"):
+            parts = line.split("\t")
+            if len(parts) == 2:
+                (present if parts[1] != "-" else missing).append(parts[0])
+        lines.append(f"- present ({len(present)}): {', '.join(f'`{t}`' for t in present) or '-'}")
+        lines.append(f"- **missing ({len(missing)})**: {', '.join(f'`{t}`' for t in missing) or '-'}")
+        for line in block("versions"):
+            lines.append(f"- {line.strip()}")
+
+        pkgs = block("packages")
+        lines += ["", f"## ROCm packages ({len(pkgs)})", "", f"```\n{chr(10).join(pkgs) or '(none)'}\n```"]
+
+        lines += ["", "## Python", ""]
+        for line in block("python"):
+            lines.append(f"- {line.strip()}")
+
+        return "\n".join(lines)
     except Exception as exc:
         return _error(exc)
 
