@@ -2,7 +2,7 @@
 
 PYTHON ?= python3
 
-.PHONY: help install lint test check
+.PHONY: help install lint test check ssh
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t22
@@ -10,9 +10,13 @@ help:  ## List targets
 install:  ## Install dependencies into the system python3 (no virtualenv)
 	$(PYTHON) -m pip install -r requirements.txt
 
+ssh:  ## Open a shell on the GPU droplet (address resolved from the API)
+	./ssh-droplet.sh
+
 lint:  ## Lint and format-check every python file in the project
 	ruff format --check .
 	ruff check .
+	shellcheck ./*.sh
 
 test:  ## Run the offline unit tests — unittest, never pytest
 	$(PYTHON) -m unittest discover -s tests -v

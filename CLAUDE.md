@@ -59,6 +59,9 @@ not what devcloud sells.
 - `make test` — `python3 -m unittest discover -s tests -v`
 - `make check` — both; run this before committing
 - `make install` — `pip install -r requirements.txt` into the system python3
+- `make ssh` / `./ssh-droplet.sh [command]` — shell on the droplet, or run one command
+  there. It resolves the address from the API on every call; pass `DROPLET_IP` to skip
+  that. The token comes from `$DIGITALOCEAN_ACCESS_TOKEN`, then `.env`, then `~/ocean.txt`.
 
 ## Environment
 
