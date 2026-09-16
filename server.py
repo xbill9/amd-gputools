@@ -7,10 +7,19 @@ executed over SSH and every lifecycle operation goes through the DigitalOcean
 v2 API. Nothing in this file touches a local GPU, and nothing should be added
 that assumes one.
 
-STATUS 2026-09-16: written against the DigitalOcean v2 API and MCP Python SDK
-2.x. The droplet has not been created yet, so no tool below has been exercised
-against live hardware. DROPLET_TAG and SSH_USER in amd.env are placeholders
-until it is.
+STATUS 2026-09-16: exercised against the live droplet
+debian-gpu-mi300x1-192gb-devcloud-atl1 (id 601142018, atl1, $1.99/hr). The API
+tools, SSH and the diagnosis path all work. The GPU itself does NOT: the MI300X
+VF is on the PCI bus and /dev/dri/renderD128 exists, but /dev/kfd does not, so
+no ROCm process can use the card until the ROCm driver stack is installed on
+the droplet. gpu_status says so rather than guessing.
+
+The droplet is reached through AMD Developer Cloud (devcloud.amd.com), which is
+DigitalOcean underneath — same v2 API, same droplet ids, token issued from the
+"My AMD Team" account. Its size slug, gpu-mi300x1-192gb-devcloud, does not
+appear in GET /v2/sizes: that endpoint lists the public gpu-mi300x1-192gb at
+$2.59/hr instead, so list_gpu_sizes shows the public catalogue, not what
+devcloud actually sells.
 
 Deliberately absent: create and destroy. This server can find, start, stop,
 reach and interrogate droplets that already exist, and it is scoped by tag so
@@ -462,11 +471,19 @@ def _summarize_rocm_smi(raw: str) -> Optional[str]:
 
 @mcp.tool(title="Show GPU status on the droplet", annotations=READ_ONLY)
 async def gpu_status(droplet: str) -> str:
-    """Report the AMD GPUs on a tagged droplet via rocm-smi, falling back to amd-smi.
+    """Report the AMD GPUs on a tagged droplet, and say why if there are none.
 
     This is the only way this project ever sees a GPU: the workstation has
-    none. A failure here is a statement about the droplet's ROCm install, not
-    about the local machine.
+    none. A failure here is a statement about the droplet, not about the local
+    machine.
+
+    NEITHER rocm-smi NOR amd-smi SETS A USEFUL EXIT CODE. MEASURED 2026-09-16
+    on debian-gpu-mi300x1-192gb-devcloud-atl1: with the driver uninitialised,
+    `rocm-smi` printed "Driver not initialized (amdgpu not found in modules)"
+    to stderr, printed nothing to stdout, and exited 0; `amd-smi list` printed
+    three ERROR lines and exited 0 as well. An earlier version of this tool
+    trusted the exit code and reported a healthy "✅" with an empty table. So
+    the parsed output decides here, and the exit code is not consulted at all.
     """
     try:
         item = await _resolve(droplet)
@@ -474,24 +491,38 @@ async def gpu_status(droplet: str) -> str:
         if why_not:
             return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
 
-        code, out, err = await run_command(
+        _, out, err = await run_command(
             _ssh_argv(ip, "rocm-smi --showid --showproductname --showuse --showmemuse --json"),
             timeout=90,
         )
-        if code == 0:
-            table = _summarize_rocm_smi(out)
-            if table:
-                return f"✅ `{item.get('name')}`\n\n{table}"
-            return f"✅ `{item.get('name')}` — rocm-smi output was not JSON:\n\n```\n{out.strip()[:4000]}\n```"
+        table = _summarize_rocm_smi(out)
+        if table:
+            return f"✅ `{item.get('name')}`\n\n{table}"
 
-        code2, out2, err2 = await run_command(_ssh_argv(ip, "amd-smi list"), timeout=90)
-        if code2 == 0:
-            return f"✅ `{item.get('name')}` — via amd-smi (rocm-smi exited {code}):\n\n```\n{out2.strip()[:4000]}\n```"
+        _, out2, err2 = await run_command(_ssh_argv(ip, "amd-smi list"), timeout=90)
+        if out2.strip() and "ERROR" not in out2 and "ERROR" not in err2:
+            return f"✅ `{item.get('name')}` — via amd-smi:\n\n```\n{out2.strip()[:4000]}\n```"
+
+        # Both tools declined to report a GPU. /dev/kfd is what separates "ROCm
+        # is broken" from "ROCm is fine but these two tools are unhappy": it is
+        # the compute node every ROCm process opens, and without it nothing on
+        # this droplet can use the card no matter what is installed.
+        _, probe, _ = await run_command(
+            _ssh_argv(ip, "test -e /dev/kfd && echo kfd:present || echo kfd:absent"),
+            timeout=60,
+        )
+        kfd_absent = "kfd:absent" in probe
+        complaint = (err or out or "").strip() or (err2 or out2 or "").strip() or "(no output)"
+        diagnosis = (
+            "`/dev/kfd` does not exist, so ROCm compute is unavailable on this droplet — the card may be "
+            "visible to `lspci` and still be unusable. The stock amdgpu module does not bring up the "
+            "compute node for an MI300X VF; that needs the ROCm driver stack installed on the droplet."
+            if kfd_absent
+            else "`/dev/kfd` exists, so the driver is up and the fault is in the tooling or its permissions."
+        )
         return (
-            f"❌ Neither rocm-smi nor amd-smi answered on `{item.get('name')}`.\n\n"
-            f"```\nrocm-smi ({code}): {(err or out).strip()[:600]}\n"
-            f"amd-smi ({code2}): {(err2 or out2).strip()[:600]}\n```\n\n"
-            f"ROCm may not be installed, or the user `{SSH_USER}` may not be in the `render`/`video` groups."
+            f"❌ No GPU reported on `{item.get('name')}` — and note both tools exited 0 while failing.\n\n"
+            f"```\n{complaint[:800]}\n```\n\n{diagnosis}"
         )
     except Exception as exc:
         return _error(exc)

@@ -232,6 +232,63 @@ class NoLocalGPUAssumptionTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"shell=True used in server.py: {offenders}")
 
 
+class GPUStatusExitCodeTests(unittest.IsolatedAsyncioTestCase):
+    """rocm-smi and amd-smi exit 0 while failing, so the exit code decides nothing.
+
+    Measured 2026-09-16 on the live MI300X droplet: with the driver
+    uninitialised, rocm-smi wrote its complaint to stderr, wrote nothing to
+    stdout and exited 0. The first version of gpu_status trusted that 0 and
+    reported "✅" with an empty table, which is the worst possible answer — a
+    broken GPU that looks healthy.
+    """
+
+    async def _run(self, responses):
+        calls = []
+
+        async def fake_run_command(cmd, timeout=120):
+            calls.append(cmd[-1])
+            return responses.pop(0)
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.gpu_status("mi300-1"), calls
+
+    async def test_zero_exit_with_empty_stdout_is_not_success(self):
+        result, _ = await self._run(
+            [
+                (0, "", "ERROR:root:Driver not initialized (amdgpu not found in modules)"),
+                (0, "ERROR: Unable to get devices, driver not initialized", ""),
+                (0, "kfd:absent\n", ""),
+            ]
+        )
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertIn("exited 0 while failing", result)
+
+    async def test_absent_kfd_is_named_as_the_cause(self):
+        result, _ = await self._run(
+            [(0, "", "Driver not initialized"), (0, "ERROR: no devices", ""), (0, "kfd:absent\n", "")]
+        )
+        self.assertIn("/dev/kfd", result)
+        self.assertIn("ROCm compute is unavailable", result)
+
+    async def test_present_kfd_points_at_the_tooling_instead(self):
+        result, _ = await self._run([(0, "", "something odd"), (0, "ERROR: no devices", ""), (0, "kfd:present\n", "")])
+        self.assertIn("driver is up", result)
+
+    async def test_healthy_json_still_reports_success(self):
+        raw = '{"card0": {"Card Series": "MI300X", "GPU use (%)": "0", "GPU Memory Use (%)": "1"}}'
+        result, calls = await self._run([(0, raw, "")])
+        self.assertTrue(result.startswith("✅"), result)
+        self.assertIn("1 GPU(s)", result)
+        self.assertEqual(len(calls), 1, "a healthy rocm-smi must not trigger the amd-smi fallback")
+
+    async def test_amd_smi_output_containing_error_is_not_success(self):
+        result, _ = await self._run(
+            [(0, "not json", ""), (0, "ERROR: Unable to detect any GPU devices", ""), (0, "kfd:absent\n", "")]
+        )
+        self.assertTrue(result.startswith("❌"), result)
+
+
 class RegistrationTests(unittest.TestCase):
     """The server key prefixes every tool name, so the four places must agree."""
 

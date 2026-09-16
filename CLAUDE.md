@@ -19,6 +19,40 @@ DigitalOcean GPU droplet.
   stay reserved and the hourly rate keeps running. Only destroying it stops the
   meter, and this repo deliberately has no tool that destroys one.
 
+## The droplet
+
+One droplet, reached through AMD Developer Cloud (`devcloud.amd.com`), which is
+DigitalOcean underneath — same v2 API, same droplet ids. The token comes from the
+**My AMD Team** account, not a personal DigitalOcean one.
+
+| | |
+| --- | --- |
+| name | `debian-gpu-mi300x1-192gb-devcloud-atl1` |
+| id | `601142018` |
+| tag | **`gemma`** — this is what `DROPLET_TAG` must be, not `amd-gputools` |
+| size | `gpu-mi300x1-192gb-devcloud` — 1× MI300X, 192 GiB VRAM, 20 vCPU, 240 GB RAM |
+| cost | **$1.99/hour**, running now |
+| OS | Debian 13 (trixie), kernel 6.12.94+deb13-amd64 |
+
+Verified 2026-09-16. Re-read the address rather than trusting this table — it changes.
+
+### The GPU does not currently work
+
+`lspci` shows the MI300X VF at `83:00.0` and `/dev/dri/renderD128` exists, but
+**`/dev/kfd` does not**, so no ROCm process can use the card. The stock Debian
+`amdgpu` does not bring up the compute node for an MI300X VF; that needs the ROCm
+driver stack installed on the droplet. `rocminfo`, `rocm-smi` and `amd-smi` are in
+`/usr/bin`, there is no `/opt/rocm`, and PyTorch is not installed.
+
+**`rocm-smi` and `amd-smi` exit 0 when they fail.** Measured on this droplet:
+`rocm-smi` printed "Driver not initialized" to stderr, printed nothing to stdout, and
+exited 0. Never branch on their exit status — parse the output. `gpu_status` does,
+after an earlier version reported a healthy "✅" with an empty table.
+
+The devcloud size slug is not in `GET /v2/sizes`, which lists the public
+`gpu-mi300x1-192gb` at $2.59/hr instead. `list_gpu_sizes` shows the public catalogue,
+not what devcloud sells.
+
 ## Commands
 
 - `make lint` — `ruff format --check .` then `ruff check .`
