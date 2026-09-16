@@ -1,0 +1,251 @@
+"""Offline unit tests for the amd-gputools MCP server.
+
+unittest, never pytest. The whole `mcp` package is mocked before `server` is
+imported, so nothing here reaches the DigitalOcean API, opens an SSH
+connection, or needs a token.
+
+A bare MagicMock is NOT enough as the fake: `@mcp.tool()` would then return a
+MagicMock instead of the decorated coroutine, and every tool test fails with
+"'MagicMock' object can't be awaited" — which reads as a broken server and is
+really a broken fake. So `tool()` is a pass-through decorator and the real
+functions survive.
+"""
+
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_DIR))
+
+
+class _FakeMCPServer:
+    def __init__(self, name):
+        self.name = name
+
+    def tool(self, *args, **kwargs):
+        def decorator(fn):
+            return fn
+
+        return decorator
+
+    async def list_tools(self):
+        return []
+
+    def run(self):
+        raise AssertionError("mcp.run() must never be called from a test")
+
+
+_mcpserver_module = MagicMock()
+_mcpserver_module.MCPServer = _FakeMCPServer
+sys.modules["mcp"] = MagicMock()
+sys.modules["mcp.server"] = MagicMock()
+sys.modules["mcp.server.mcpserver"] = _mcpserver_module
+sys.modules["mcp.types"] = MagicMock()
+
+import server  # noqa: E402
+
+ACTIVE = {
+    "id": 123456789,
+    "name": "mi300-1",
+    "status": "active",
+    "size_slug": "gpu-mi300x1-192gb",
+    "region": {"slug": "atl1"},
+    "networks": {
+        "v4": [{"type": "private", "ip_address": "10.0.0.2"}, {"type": "public", "ip_address": "203.0.113.7"}]
+    },
+    "tags": ["amd-gputools"],
+}
+OFF = dict(ACTIVE, id=987654321, name="mi300-2", status="off", networks={"v4": []})
+
+
+class TokenTests(unittest.TestCase):
+    """The token is read from the environment, never from the committed amd.env."""
+
+    def test_missing_token_names_the_right_file(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                server._token()
+        message = str(ctx.exception)
+        self.assertIn("DIGITALOCEAN_ACCESS_TOKEN", message)
+        # The remediation must not send anyone to the committed file.
+        self.assertIn(".env", message)
+        self.assertIn("never in `amd.env`", message)
+
+    def test_either_env_var_works(self):
+        for name in ("DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"):
+            with patch.dict("os.environ", {name: "dop_v1_x"}, clear=True):
+                self.assertEqual(server._token(), "dop_v1_x")
+
+    def test_amd_env_carries_no_secret(self):
+        """amd.env is committed, so a token appearing in it is a leak."""
+        text = (PROJECT_DIR / "amd.env").read_text()
+        self.assertNotIn("dop_v1_", text)
+        for line in text.splitlines():
+            if line.strip().startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            self.assertNotIn("TOKEN", key.upper(), f"secret-shaped key in committed amd.env: {line}")
+
+
+class PublicIPTests(unittest.TestCase):
+    """The address is resolved per call; a rebuilt droplet gets a new one."""
+
+    def test_picks_public_not_private(self):
+        self.assertEqual(server._public_ip(ACTIVE), "203.0.113.7")
+
+    def test_none_when_networking_is_not_up(self):
+        self.assertIsNone(server._public_ip(OFF))
+
+
+class SSHArgvTests(unittest.TestCase):
+    """ssh must fail instead of prompting: a prompt hangs the tool with no output."""
+
+    def test_never_prompts(self):
+        argv = server._ssh_argv("203.0.113.7", "rocm-smi")
+        self.assertIn("BatchMode=yes", argv)
+        self.assertIn("StrictHostKeyChecking=accept-new", argv)
+        self.assertIn("ConnectTimeout=10", argv)
+
+    def test_command_is_one_argument(self):
+        """The remote command is a single argv entry — no local shell splits it."""
+        argv = server._ssh_argv("203.0.113.7", "echo one two; echo three")
+        self.assertEqual(argv[-1], "echo one two; echo three")
+
+    def test_key_is_only_passed_when_configured(self):
+        with patch.object(server, "SSH_KEY", ""):
+            self.assertNotIn("-i", server._ssh_argv("203.0.113.7"))
+        with patch.object(server, "SSH_KEY", "~/.ssh/amd"):
+            argv = server._ssh_argv("203.0.113.7")
+            self.assertIn("-i", argv)
+            self.assertNotIn("~", argv[argv.index("-i") + 1], "~ must be expanded; ssh does not expand it")
+
+
+class ReachableTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_with_ip(self):
+        ip, why_not = await server._reachable(ACTIVE)
+        self.assertEqual(ip, "203.0.113.7")
+        self.assertIsNone(why_not)
+
+    async def test_off_droplet_is_refused_with_the_fix(self):
+        ip, why_not = await server._reachable(OFF)
+        self.assertIsNone(ip)
+        self.assertIn("start_droplet", why_not)
+
+
+class ResolveTests(unittest.IsolatedAsyncioTestCase):
+    """Resolution is tag-scoped: an untagged droplet cannot be addressed at all."""
+
+    async def test_by_id_and_by_name(self):
+        with patch.object(server, "_droplets", AsyncMock(return_value=[ACTIVE, OFF])):
+            self.assertEqual((await server._resolve("123456789"))["name"], "mi300-1")
+            self.assertEqual((await server._resolve("mi300-2"))["id"], 987654321)
+
+    async def test_unknown_droplet_lists_what_is_available(self):
+        with patch.object(server, "_droplets", AsyncMock(return_value=[ACTIVE])):
+            with self.assertRaises(RuntimeError) as ctx:
+                await server._resolve("999")
+        self.assertIn("mi300-1", str(ctx.exception))
+
+    async def test_empty_tag_scope_says_how_to_fix_it(self):
+        with patch.object(server, "_droplets", AsyncMock(return_value=[])):
+            with self.assertRaises(RuntimeError) as ctx:
+                await server._resolve("anything")
+        self.assertIn("DROPLET_TAG", str(ctx.exception))
+
+
+class ToolErrorTests(unittest.IsolatedAsyncioTestCase):
+    """Tools return '❌ ...' — an exception escaping one kills the server process."""
+
+    async def test_api_failure_becomes_a_string(self):
+        with patch.object(server, "_droplets", AsyncMock(side_effect=RuntimeError("boom"))):
+            result = await server.list_droplets()
+        self.assertTrue(result.startswith("❌"), result)
+
+    async def test_every_tool_catches(self):
+        source = (PROJECT_DIR / "server.py").read_text()
+        decorated = source.count("@mcp.tool(")
+        caught = source.count("except Exception as exc:")
+        # get_help has no external call and needs no handler; everything else does.
+        self.assertEqual(caught, decorated - 1, "a tool is missing its `except Exception` guard")
+
+
+class StopDropletTests(unittest.IsolatedAsyncioTestCase):
+    async def test_graceful_sends_shutdown_and_hard_sends_power_off(self):
+        sent = []
+
+        async def fake_api(method, path, payload=None, timeout=30):
+            sent.append(payload["type"])
+            return {"action": {"id": 1, "status": "in-progress"}}
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "_api", fake_api):
+                await server.stop_droplet("mi300-1")
+                await server.stop_droplet("mi300-1", graceful=False)
+        self.assertEqual(sent, ["shutdown", "power_off"])
+
+    async def test_says_billing_continues(self):
+        """The costly misconception this server exists to correct."""
+        with patch.object(server, "_resolve", AsyncMock(return_value=OFF)):
+            result = await server.stop_droplet("mi300-2")
+        self.assertIn("billed", result.lower())
+
+
+class RocmSmiSummaryTests(unittest.TestCase):
+    """Counting and totalling happen here, not in the model reading the output."""
+
+    def test_counts_cards(self):
+        raw = """{"card0": {"Card Series": "MI300X", "GPU use (%)": "97", "GPU Memory Use (%)": "81"},
+                  "card1": {"Card Series": "MI300X", "GPU use (%)": "0", "GPU Memory Use (%)": "2"}}"""
+        table = server._summarize_rocm_smi(raw)
+        self.assertIn("2 GPU(s)", table)
+        self.assertIn("MI300X", table)
+
+    def test_non_json_is_rejected_rather_than_guessed(self):
+        self.assertIsNone(server._summarize_rocm_smi("GPU[0] : something human readable"))
+        self.assertIsNone(server._summarize_rocm_smi("[]"))
+
+
+class NoLocalGPUAssumptionTests(unittest.TestCase):
+    """This workstation has no AMD GPU; every ROCm call must go through ssh."""
+
+    def test_rocm_is_only_ever_invoked_remotely(self):
+        source = (PROJECT_DIR / "server.py").read_text()
+        for line in source.splitlines():
+            stripped = line.strip()
+            if "rocm-smi" in stripped or "amd-smi" in stripped:
+                if stripped.startswith("#") or stripped.startswith('"') or "_ssh_argv" in stripped:
+                    continue
+                self.assertNotIn(
+                    "run_command(",
+                    stripped,
+                    f"ROCm invoked without _ssh_argv — there is no local GPU: {stripped[:120]}",
+                )
+
+    def test_no_shell_true_anywhere(self):
+        """The only permitted mention of shell=True is the rule forbidding it."""
+        source = (PROJECT_DIR / "server.py").read_text()
+        offenders = [
+            line.strip() for line in source.splitlines() if "shell=True" in line and "Never shell=True" not in line
+        ]
+        self.assertEqual(offenders, [], f"shell=True used in server.py: {offenders}")
+
+
+class RegistrationTests(unittest.TestCase):
+    """The server key prefixes every tool name, so the four places must agree."""
+
+    def test_mcp_json_matches_the_directory_name(self):
+        import json
+
+        config = json.loads((PROJECT_DIR / ".mcp.json").read_text())
+        servers = config["mcpServers"]
+        self.assertEqual(list(servers), [PROJECT_DIR.name])
+        entry = servers[PROJECT_DIR.name]
+        self.assertEqual(entry["command"], "python3", "no virtualenv path — the repo uses the system python3")
+        self.assertEqual(entry["args"], ["server.py"])
+        self.assertEqual(entry["env"]["MCP_SERVER_NAME"], PROJECT_DIR.name)
+
+
+if __name__ == "__main__":
+    unittest.main()

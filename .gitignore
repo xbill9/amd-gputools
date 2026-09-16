@@ -1,0 +1,9 @@
+# Live API token, mode 0600. Never committed, never echoed.
+.env
+
+__pycache__/
+*.py[cod]
+.ruff_cache/
+
+# Runtime state (pids, logs, fetched artifacts).
+run/

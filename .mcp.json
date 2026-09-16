@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "amd-gputools": {
+      "command": "python3",
+      "args": [
+        "server.py"
+      ],
+      "env": {
+        "MCP_SERVER_NAME": "amd-gputools"
+      }
+    }
+  }
+}
