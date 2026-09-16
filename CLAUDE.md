@@ -120,6 +120,56 @@ A real environment variable always wins over `amd.env`.
   result — `list_droplets` and `_summarize_rocm_smi` compute their own tallies rather
   than printing rows for a reader to add up.
 
+## Serving with vLLM
+
+Two paths, both in `vllm/`, both driven from `amd.env`:
+
+- **`vllm/docker-serve.sh`** — AMD's `rocm/vllm` image. This is the supported path and
+  the one to reach for first. The image carries its own ROCm userspace; only the
+  kernel `amdgpu` and `/dev/kfd` come from the host.
+- **`vllm/baremetal-install.sh`** — PyTorch ROCm wheels into the system python3.
+
+**Bare metal gets PyTorch, not vLLM, and that is not a shortcut.** There is no prebuilt
+vLLM wheel for ROCm anywhere: PyPI's `vllm` wheels are CUDA builds, AMD's manylinux
+index at `repo.radeon.com` carries torch and triton but no vllm, and the
+per-architecture nightly index is not published (all checked 2026-09-16). Building from
+source needs `hipcc` plus `rocblas`, `hipblaslt`, `miopen` and `rccl`; Debian 13 ships
+`hipcc` 5.7.1 and none of those libraries, and AMD's repo does not support trixie.
+vLLM therefore comes from the container. Getting it bare metal means either moving the
+droplet to Ubuntu 24.04 or installing AMD's ROCm on an unsupported distro — a decision,
+not a missing step.
+
+The torch ROCm wheel bundles its own ROCm runtime libraries in `torch/lib`, which is why
+bare metal works with no `/opt/rocm` at all. Install with `pip --break-system-packages`;
+Debian 13 marks the system python externally-managed (PEP 668) and the thing it steers
+you toward is a virtualenv, which this project does not use.
+
+Verified 2026-09-16: `torch 2.9.1+rocm6.4` (HIP 6.4.43484) on the system python3,
+**557.7 TFLOP/s** on an 8192³ fp16 matmul. `numpy` is not installed, so torch prints a
+"Failed to initialize NumPy" warning — harmless for this, worth installing before real
+work.
+
+Pick the image tag by GPU architecture: `gfx94X-dcgpu` is MI300-series (this box),
+`cdna` is the same family at twice the size, and `gfx110X`/`gfx120X` are RDNA and will
+not run here.
+
+**Pass the GPU groups as numeric GIDs resolved on the host.** `--group-add render`
+fails outright — `Unable to find group render: no matching entries in group file` —
+because the Ubuntu 24.04 image has no `render` group of its own. `video` exists in both
+with no guarantee the numbers agree. On this host they are `video:44`, `render:991`.
+
+A newer container ROCm than the host's is fine: ROCm **7.13** userspace in the image
+drives the host's in-tree **6.12** `amdgpu` correctly, reporting "AMD Instinct MI300X
+VF" and 304 CUs. Only the kernel driver and `/dev/kfd` come from the host.
+
+Verified 2026-09-16: image 44.3 GB unpacked, vLLM 0.19.1 serving Qwen2.5-7B-Instruct
+**84 seconds** after container start, `max_model_len` 32768, 186.6 GB of the 191.7 GB
+VRAM preallocated at the default `gpu_memory_utilization`.
+
+The default model is deliberately ungated. A gated repo (every Gemma one, Llama) turns
+a first run into a Hugging Face login problem instead of a vLLM problem; set `HF_TOKEN`
+in `.env` and switch `VLLM_MODEL` once the path itself is known to work.
+
 ## Not a gemma4-dev rig
 
 This project borrows conventions from `~/gemma4-dev` but is not one of its rigs. The
