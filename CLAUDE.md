@@ -36,13 +36,25 @@ DigitalOcean underneath — same v2 API, same droplet ids. The token comes from 
 
 Verified 2026-09-16. Re-read the address rather than trusting this table — it changes.
 
-### The GPU does not currently work
+### The GPU works — but a freshly provisioned droplet needs one reboot
 
-`lspci` shows the MI300X VF at `83:00.0` and `/dev/dri/renderD128` exists, but
-**`/dev/kfd` does not**, so no ROCm process can use the card. The stock Debian
-`amdgpu` does not bring up the compute node for an MI300X VF; that needs the ROCm
-driver stack installed on the droplet. `rocminfo`, `rocm-smi` and `amd-smi` are in
-`/usr/bin`, there is no `/opt/rocm`, and PyTorch is not installed.
+Verified working 2026-09-16: `gfx942`, AMD Instinct MI300X VF, 304 CUs, 191.7 GiB
+VRAM, ISA `amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-`.
+
+**On a fresh droplet `/dev/kfd` is missing until you reboot once.** Before the
+reboot `lspci` shows the card and `/dev/dri/renderD128` exists, but `amdgpu` has
+already failed to bind and unloaded, so no ROCm process can use it. Nothing needs
+installing — Debian's in-tree `amdgpu` plus the ROCm 6.1.2 userspace already on the
+image are enough. Reboot, don't debug: an hour went into diagnosing a driver stack
+that was fine.
+
+These dmesg lines are benign on a VF and are not the problem: `failed to load
+amdgpu/psp_13_0_6_cap.bin (-2)`, `Unsupported TA type: 8`, `TMZ feature not
+supported`.
+
+ROCm is the Debian packaging (`rocm-smi`, `rocminfo` in `/usr/bin`, ROCm 6.1.2), not
+AMD's own repo — there is no `/opt/rocm` and no `amdgpu-dkms`. PyTorch is not
+installed.
 
 **`rocm-smi` and `amd-smi` exit 0 when they fail.** Measured on this droplet:
 `rocm-smi` printed "Driver not initialized" to stderr, printed nothing to stdout, and

@@ -8,11 +8,13 @@ v2 API. Nothing in this file touches a local GPU, and nothing should be added
 that assumes one.
 
 STATUS 2026-09-16: exercised against the live droplet
-debian-gpu-mi300x1-192gb-devcloud-atl1 (id 601142018, atl1, $1.99/hr). The API
-tools, SSH and the diagnosis path all work. The GPU itself does NOT: the MI300X
-VF is on the PCI bus and /dev/dri/renderD128 exists, but /dev/kfd does not, so
-no ROCm process can use the card until the ROCm driver stack is installed on
-the droplet. gpu_status says so rather than guessing.
+debian-gpu-mi300x1-192gb-devcloud-atl1 (id 601142018, atl1, $1.99/hr). Every
+tool works and the GPU reports: gfx942, MI300X VF, 304 CUs, 191.7 GiB VRAM.
+
+A freshly provisioned droplet has no /dev/kfd until it is rebooted once —
+amdgpu fails to bind during provisioning and unloads, leaving a card that lspci
+can see and nothing can use. Nothing needs installing. gpu_status names /dev/kfd
+when it is missing precisely so the answer is "reboot it", not "debug ROCm".
 
 The droplet is reached through AMD Developer Cloud (devcloud.amd.com), which is
 DigitalOcean underneath — same v2 API, same droplet ids, token issued from the
