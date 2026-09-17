@@ -509,6 +509,10 @@ def _summarize_rocm_smi(raw: str) -> Optional[str]:
                     return str(value)
         return "-"
 
+    # The VRAM key is "GPU Memory Allocated (VRAM%)" on ROCM-SMI 2.2.0 here, not
+    # any of the plausible "GPU Memory Use (%)" spellings. Measured 2026-09-16
+    # while vLLM held 168.3 GiB: this table printed "-" and read as an idle card.
+    # The older spellings stay as fallbacks for other rocm-smi builds.
     rows = ["| Card | Product | GPU use % | VRAM used % |", "| --- | --- | --- | --- |"]
     count = 0
     for card, values in sorted(data.items()):
@@ -517,7 +521,7 @@ def _summarize_rocm_smi(raw: str) -> Optional[str]:
         count += 1
         rows.append(
             f"| {card} | {pick(values, 'cardseries', 'devicename', 'productname')} "
-            f"| {pick(values, 'gpuuse(%)', 'gpuuse')} | {pick(values, 'gpumemoryuse(%)', 'memoryuse(%)')} |"
+            f"| {pick(values, 'gpuuse(%)', 'gpuuse')} | {pick(values, 'gpumemoryallocated(vram%)', 'gpumemoryuse(%)', 'memoryuse(%)')} |"
         )
     if not count:
         return None

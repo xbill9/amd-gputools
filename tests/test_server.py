@@ -257,6 +257,15 @@ class RocmSmiSummaryTests(unittest.TestCase):
         self.assertIn("2 GPU(s)", table)
         self.assertIn("MI300X", table)
 
+    def test_reads_the_vram_key_rocm_smi_actually_emits(self):
+        """Verbatim from ROCM-SMI 2.2.0 while vLLM held 168.3 GiB of 191.7 GiB."""
+        raw = """{"card0": {"Device Name": "Aqua Vanjaram [Instinct MI300X VF]",
+                            "GPU use (%)": "0", "GPU Memory Allocated (VRAM%)": "87",
+                            "Card Series": "Aqua Vanjaram [Instinct MI300X VF]"}}"""
+        table = server._summarize_rocm_smi(raw)
+        self.assertIn("| 87 |", table)
+        self.assertNotIn("| - |", table)
+
     def test_non_json_is_rejected_rather_than_guessed(self):
         self.assertIsNone(server._summarize_rocm_smi("GPU[0] : something human readable"))
         self.assertIsNone(server._summarize_rocm_smi("[]"))
