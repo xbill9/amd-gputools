@@ -10,7 +10,7 @@ There are two halves to running a GPU box you do not own: **managing the platfor
 
 Two things came out of it. The control plane is where the interesting engineering was, because that is where the measurements come from, and twice in one day it reported a healthy box that was not the box that existed. And once you can ask the card questions cheaply, the question worth asking is **which numeric formats it will actually execute** — where the answer contradicts the spec sheet, the library and the vendor's own capability list, one each.
 
-The repository is at https://github.com/xbill9/amd-gputools.
+The repository is at [github.com/xbill9/amd-gputools](https://github.com/xbill9/amd-gputools).
 
 ## The Box, In Detail
 
