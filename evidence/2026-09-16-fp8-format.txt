@@ -1,0 +1,24 @@
+Captured 2026-09-16 inside the vllm container on debian-gpu-mi300x1-192gb-devcloud-atl1,
+torch 2.12.0+rocm10.0.0, arch gfx942:sramecc+:xnack-. Verbatim script output.
+
+arch: gfx942:sramecc+:xnack-
+float8_e4m3fn      max=   448.0 min=   -448.0 eps=0.125      tiny=0.015625     bits=8
+float8_e4m3fnuz    max=   240.0 min=   -240.0 eps=0.125      tiny=0.0078125    bits=8
+float8_e5m2        max= 57344.0 min= -57344.0 eps=0.25       tiny=6.103515625e-05 bits=8
+float8_e5m2fnuz    max= 57344.0 min= -57344.0 eps=0.125      tiny=3.0517578125e-05 bits=8
+
+bit pattern 0b01000000 as float8_e4m3fn      -> 2.0
+bit pattern 0b01000000 as float8_e4m3fnuz    -> 1.0
+
+float8_e4m3fn      round-trip [1.0, 2.0, 240.0, 448.0] -> [1.0, 2.0, 240.0, 448.0]
+float8_e4m3fnuz    round-trip [1.0, 2.0, 240.0, 448.0] -> [1.0, 2.0, 240.0, nan]
+
+vLLM gating, same box:
+supports_mx() = False ; on_gfx942 = True ; on_gfx950 = False ; supports_fp8() = True
+fp8_dtype = torch.float8_e4m3fnuz
+EmulationMxfp4LinearKernel.apply_weights:
+    dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
+    qdq_x = self.quant_dequant_func(x)
+    return F.linear(qdq_x, dq_w, bias)
+RocmPlatform.supports_mx:
+    return any(gfx in _GCN_ARCH for gfx in ["gfx95", "gfx1250"])

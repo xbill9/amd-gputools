@@ -1,13 +1,14 @@
 ---
 title: "Driving an MI300X Over MCP: Twelve Tools, One $1.99/Hour Card, and the Two Times the Control Plane Lied"
 published: false
-description: "An MCP control plane for a single AMD Instinct MI300X on AMD Developer Cloud: twelve tag-scoped tools for inventory, reboot, hardware scan and GPU state, with worked examples. The workload it manages is Gemma 4 on vLLM — where the newest vendor image cannot load the model at all."
-tags: amd, mcp, vllm, rocm
+description: "An MCP control plane for a single AMD Instinct MI300X on AMD Developer Cloud: twelve tag-scoped tools for inventory, reboot, hardware scan and GPU state, with worked examples — and what the card measures at when you ask which numeric formats it actually executes. fp8 is 1.77x bf16; int8, which the spec rates identically, is 0.69x."
+tags: amd, mcp, rocm, machinelearning
+cover_image: https://raw.githubusercontent.com/xbill9/amd-gputools/main/devto-cover.fe2cfa4c.jpg
 ---
 
 There are two halves to running a GPU box you do not own: **managing the platform**, and **running the workload**. This article is mostly about the first half. The workstation writing this has no AMD GPU and never will — the hardware is one MI300X droplet on AMD Developer Cloud, billed at $1.99 an hour, and everything that reaches it goes through an MCP server: twelve tools for inventory, power, reboot, hardware inventory, GPU state and remote execution.
 
-The workload is `google/gemma-4-E2B-it` served by vLLM, and it earns its section — three ROCm images were tried and **the newest vendor image cannot load the model at all**. But the interesting engineering was in the control plane, because that is where the measurements come from, and twice in one day the control plane reported a healthy box that was not the box that existed.
+Two things came out of it. The control plane is where the interesting engineering was, because that is where the measurements come from, and twice in one day it reported a healthy box that was not the box that existed. And once you can ask the card questions cheaply, the question worth asking is **which numeric formats it will actually execute** — where the answer contradicts the spec sheet, the library and the vendor's own capability list, one each.
 
 The repository is at https://github.com/xbill9/amd-gputools.
 
@@ -47,9 +48,11 @@ Everything in these three tables was read off the machine by `hardware_scan`, `r
 
 | Pool | Total | Used |
 | --- | --- | --- |
-| VRAM | 205,822,885,888 B = **191.69 GiB** | 180,717,051,904 B = 168.31 GiB (87%) |
+| VRAM | 205,822,885,888 B = **191.69 GiB** | 180,717,051,904 B = 168.31 GiB (87%†) |
 | VIS_VRAM (host-visible) | 205,822,885,888 B = 191.69 GiB | 180,717,051,904 B = 168.31 GiB |
 | GTT (system memory aperture) | 126,676,250,624 B = 117.98 GiB | 21,327,872 B = 0.02 GiB |
+
+† 87 is what `rocm-smi` reports; the division gives 87.8%. The tool truncates, and this article quotes the tool.
 
 Two things worth reading off that table. **VIS_VRAM equals VRAM**: this is a large-BAR configuration, the entire 191.69 GiB is CPU-mappable, and no part of the framebuffer is hidden behind the old 256 MB window. And `rocminfo` reports three GLOBAL pools — coarse grained, fine grained and extended fine grained — each at 200,998,912 KB, which is the same 191.69 GiB described three ways, not three separate allocations.
 
@@ -175,9 +178,7 @@ Poll `action_status`; SSH came back about 20s after the action completed when th
 measured. Then check `gpu_status`.
 ```
 
-The action id in that reply is what `action_status` then polls, until the reboot action
-reports `completed` with its start and finish timestamps. The sequence is three calls and
-no guessing: reboot, poll, `gpu_status`.
+The action id in that reply is what `action_status` then polls, until the reboot action reports `completed` with its start and finish timestamps. The sequence is three calls and no guessing: reboot, poll, `gpu_status`.
 
 An hour went into diagnosing a driver stack that was fine, which is why that instruction now lives in the tool's own docstring where a model will read it before it starts debugging. These dmesg lines are benign on a VF and are *not* the problem: `failed to load amdgpu/psp_13_0_6_cap.bin (-2)`, `Unsupported TA type: 8`, `TMZ feature not supported`.
 
@@ -189,7 +190,7 @@ This is the section that justifies writing a control plane instead of piping `ss
 
 **Lie one: the exit code.** With the driver uninitialised, `rocm-smi` printed `Driver not initialized (amdgpu not found in modules)` to **stderr**, printed nothing to stdout, and **exited 0**. `amd-smi list` printed three ERROR lines and also exited 0. An early version of `gpu_status` trusted the exit status and reported a cheerful `✅` above an empty table. Neither tool sets a useful exit code, so the current version does not consult the exit code at all: it parses `rocm-smi --json`, and if the parse does not yield at least one card it falls through to `amd-smi list`, and if that fails too it says so and explains why.
 
-**Lie two: a key name I guessed.** Earlier today `gpu_status` returned this, and I read it aloud as an idle card with nothing running:
+**Lie two: a key name I guessed.** On 2026-09-16 `gpu_status` returned this, and I read it aloud as an idle card with nothing running:
 
 ```
 | Card | Product | GPU use % | VRAM used % |
@@ -237,37 +238,106 @@ The rules this server follows, all of them earned:
 - **Annotate write and destructive tools.** `READ_ONLY`, `WRITE`, `DESTRUCTIVE` — so a client can gate the ones that cost money or kill a running job.
 - **Tests run offline.** The whole `mcp` package is mocked before `server` is imported, so no test needs a token or a network.
 
-## The Workload: Three vLLM Images, One Card
+## What The Silicon Will Actually Compute
 
-With the platform managed, the workload. `google/gemma-4-E2B-it` — Apache-2.0 and **ungated**, which matters more than it sounds like, since a gated repo turns a first run into a Hugging Face login problem instead of a vLLM problem. There is no `gemma-4-2B`: the lineup is E2B, E4B, 12B, 26B-A4B and 31B, and E2B is the effective-2B MatFormer member at 10.25 GB of bf16 safetensors.
+The control plane exists to report what the box is. The most consequential thing it reports is not capacity — it is **which numeric formats the matrix cores execute natively**, because that decides every quantization choice made afterwards, and it is the question a spec sheet answers least reliably.
 
-| | `rocm/vllm` 0.19.1 | `rocm/vllm` 0.27.0 | `vllm-openai-rocm:nightly-rocm100` |
-| --- | --- | --- | --- |
-| Built | 2026-05-19 | 2026-08-27 | 2026-09-16 |
-| vLLM | 0.19.1 | 0.27.1.dev5 | 0.29.1rc1.dev187+gaf1c014 |
-| torch | 2.10.0+rocm7.13.0 | 2.12.0+rocm10.0.0 | 2.12.0+rocm10.0.0 |
-| transformers | 5.8.1 | 5.16.1 | 5.17.0 |
-| Size | 44.3 GB | 61.7 GB | 35.1 GB |
-| `Gemma4ModelArchConfigConvertor` | n/a | **no** | yes |
-| Serves E2B | yes | **no** | yes |
+Measured on the card 2026-09-16: 8192³ matmul, 30 iterations, torch 2.12.0+rocm10.0.0. The card was concurrently serving, so the absolute rates are depressed and **the ratios are the result**.
 
-The middle column is the newest image AMD publishes, the largest of the three, passes a `gfx942` bf16 matmul, and registers the Gemma 4 model class. It still cannot serve the model. It dies in config parsing, before the GPU is touched:
+| dtype | ms | TFLOP/s | Spec peak | % of peak | vs bf16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bf16 | 1.655 | 664.3 | 1307.4 | 50.8% | 1.00x |
+| fp16 | 1.660 | 662.5 | 1307.4 | 50.7% | 1.00x |
+| **fp8 `e4m3fnuz`** | **0.938** | **1172.5** | 2614.9 | 44.8% | **1.77x** |
+| int8 | 2.413 | 455.6 | 2614.9 | 17.4% | **0.69x** |
+
+Four readings, and three of them contradict something plausible.
+
+**bf16 and fp16 are the same number because they are the same hardware.** CDNA 3 runs both through one matrix pipeline at one peak of 1307.4 TFLOP/s. fp16 is not a cheaper precision you can trade down to here; it is the same speed with less exponent range. There is no decision to make between them.
+
+**fp8 is the only format on this card faster than bf16** — 1.77x measured against 2.00x theoretical, which is what a genuinely native path looks like once the parts of a matmul that are not the multiply are accounted for.
+
+**int8 measured slower than bf16, and the spec says it should not have.** AMD rates int8 at 2614.9 TOPS — exactly fp8's number, exactly double bf16's. On that basis the two are interchangeable and int8 is the better-supported choice. Measured, int8 reached 17.4% of its own peak and **0.69x bf16**. The silicon is not the problem; the kernels are, and `torch._int_mm` is not reaching a tuned path on this stack. **An equal number in a spec table is not an equal number on the machine.**
+
+**fp4 is not there at all**, and this is the one the tooling actively misleads you about. `supported_quantization` on this platform lists `mxfp4` and `mxfp8`; torch 2.12 defines `torch.float4_e2m1fn_x2`. Neither is a statement about this GPU. Ask the hardware and it is unambiguous:
 
 ```
-AmbiguousGlobalPerLayerAttributeError: 'head_dim' is a per-layer attribute and may vary
-across layers. Access it via the individual layer configs instead.
-
-vllm/transformers_utils/model_arch_config_convertor.py:608 in get_head_size
-    head_dim = getattr(self.hf_text_config, "head_dim", 0)
+>>> torch._scaled_mm(a4, b4, scale_a=s, scale_b=s, out_dtype=torch.bfloat16)
+NotImplementedError: Block-wise scaling for Float8_e8m0fnu is only supported on gfx950,gfx1250
 ```
 
-Gemma 4 uses dual attention: in E2B's `config.json`, `text_config.head_dim` is 256 and `global_head_dim` is 512, with `layer_types` alternating 31 sliding-attention layers against 4 full-attention ones. Transformers 5.15+ models that honestly — `head_dim` becomes a per-layer attribute and a *global* read raises instead of silently returning one of the two. vLLM's generic `get_head_size()` asks with a default, and **the default never applies**: `getattr`'s third argument only catches `AttributeError`, and this is a subclass raised deliberately by the accessor. The line that looks like it covers the case is the line that fails. Upstream fixes it with a `Gemma4ModelArchConfigConvertor` that builds per-layer configs and never asks globally; that class is absent from the 0.27.1.dev5 build.
+vLLM gates on exactly the same boundary:
 
-So **the broken build sits between the two that work** — 0.19.1 escapes from the other side, because transformers 5.8.1 predates per-layer attributes and reads a flat 256. This is a version-pairing bug, not a ROCm one.
+```python
+@classmethod
+def supports_mx(cls) -> bool:
+    return any(gfx in _GCN_ARCH for gfx in ["gfx95", "gfx1250"])
+```
 
-Two checks cost nothing and rule out a 35–62 GB pull. Read the convertor registry — `MODEL_ARCH_CONFIG_CONVERTORS.get("gemma4")`, importing `vllm.config` first or a circular import makes a good image look broken. And read `torch.cuda.get_arch_list()` **with `/dev/kfd` and `/dev/dri` mapped in**, or it returns `[]`, which reads exactly like "no kernels for you" and is nothing of the sort.
+`gfx942` is CDNA 3; MX formats arrive with CDNA 4 (`gfx950`, MI350X/MI355X). Here `supports_mx()` is `False`, and rather than refusing, the stack falls back to an emulation kernel whose entire forward pass is:
 
-One more trap worth stating: the two image families take different argv. `vllm/vllm-openai-rocm` sets `ENTRYPOINT ["vllm","serve"]`, so the model id is the first argument; AMD's images have no entrypoint and need `vllm serve` spelled out. And pass the GPU groups as **numeric GIDs resolved on the host** — `--group-add render` fails outright, because the Ubuntu-based image has no `render` group of its own. Here they are `video:44`, `render:991`.
+```python
+dq_w  = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
+qdq_x = self.quant_dequant_func(x)
+return F.linear(qdq_x, dq_w, bias)
+```
+
+It widens the 4-bit weights back to bf16 **on every forward pass**, round-trips the activations through quantize-dequantize to reproduce fp4's error, and runs an ordinary bf16 `F.linear`. You get bf16 speed, no resident saving while computing, plus dequantization overhead, plus the full quantization error. That kernel is an instrument for answering *"would this model survive fp4"* before buying hardware that runs it. It is not a deployment path, and its own log line says so.
+
+### The trap inside fp8: `fnuz` is not `fn`
+
+fp8 being native makes it tempting to pull a ready-made fp8 checkpoint off the Hub. Do not. **CDNA 3 implements a different fp8 than Hopper and Blackwell do.** From `torch.finfo` on this box:
+
+| | `e4m3fn` (NVIDIA, OCP) | `e4m3fnuz` (CDNA 3) |
+| --- | ---: | ---: |
+| Largest finite value | 448.0 | **240.0** |
+| Smallest normal | 0.015625 | **0.0078125** |
+
+The exponent bias differs by one. The cleanest way to see what that means is to read a single byte as both types:
+
+```
+bit pattern 0b01000000 as float8_e4m3fn   -> 2.0
+bit pattern 0b01000000 as float8_e4m3fnuz -> 1.0
+```
+
+**One bit pattern, two values, a factor of two apart.** Reinterpreting an `e4m3fn` tensor as `e4m3fnuz` halves every number in it. At the top of the range it is worse than halved:
+
+```
+float8_e4m3fn   round-trip [1.0, 2.0, 240.0, 448.0] -> [1.0, 2.0, 240.0, 448.0]
+float8_e4m3fnuz round-trip [1.0, 2.0, 240.0, 448.0] -> [1.0, 2.0, 240.0, nan]
+```
+
+448 is an ordinary weight on an H100 and is **NaN** on an MI300X.
+
+In the other direction the hardware at least fails loudly rather than quietly:
+
+```
+float8_e4m3fn:   FAILED -> RuntimeError: HIPBLAS_STATUS_NOT_SUPPORTED
+float8_e4m3fnuz: _scaled_mm OK  out=(4096, 4096) torch.bfloat16
+```
+
+vLLM agrees from its own side — `is_fp8_fnuz()` keys on the string `"gfx94"`, and `fp8_dtype()` returns `torch.float8_e4m3fnuz`. So the safe route is to quantize **online, from the bf16 weights**, and never to go looking for a checkpoint: the scales are then derived on the machine that will run them.
+
+### GGUF is not compiled in at all
+
+Worth stating because it fails differently from everything above — not gated, absent:
+
+| Check | Result |
+| --- | --- |
+| `'gguf' in supported_quantization` | False |
+| `'gguf' in QUANTIZATION_METHODS` (the global registry) | **False** |
+| `vllm.model_executor.layers.quantization.gguf` | `ModuleNotFoundError` |
+| ggml/gguf symbols in `_custom_ops` | **none** |
+
+Older builds accepted `--quantization gguf`; this one has no such module. GGUF here means changing inference engine rather than passing a flag — and since its k-quants are weight-only anyway, dequantized in-kernel with the arithmetic still at bf16, it would not have unlocked a format the matrix cores lack.
+
+**The whole answer for this card is one line: fp8 `e4m3fnuz`, quantized online, and nothing else.** That is a surprising amount of ground to cover for a one-line conclusion, which is the point — the spec sheet, the library and the capability list each pointed somewhere else.
+
+## The Workload, Briefly
+
+The card is not idle hardware. It serves `google/gemma-4-E2B-it` through vLLM in a container, and that workload is what the memory figures below are measured against. The engine reports `dtype=torch.bfloat16, quantization=None`, matching the checkpoint's own `dtype: bfloat16` — so everything in this article is measured against an **unquantized** baseline, and the 1.77x above is available and unclaimed.
+
+The deployment itself is the subject of a companion article and is not repeated here. One finding from it is worth carrying across, because it is the same shape as the two lies in Worked Example 4: **the newest ROCm vLLM image AMD publishes cannot load Gemma 4 at all.** It lacks `Gemma4ModelArchConfigConvertor`, so a *global* read of `head_dim` raises during config parsing, before the GPU is touched — Gemma 4 runs 256-wide heads on its sliding-attention layers and 512 on its full-attention ones, and transformers 5.15+ reports that as a per-layer attribute. The oldest image works because its transformers predates per-layer attributes; the nightly works because it has the convertor. **The broken build sits between the two that work**, which is not a thing version intuition predicts.
 
 ## Where The 191.69 GiB Goes
 
@@ -309,12 +379,15 @@ Text, thinking, tool calling and vision were each exercised against the live end
 | Arch check | `get_arch_list()` read with devices mapped in, plus a live bf16 GEMM |
 | Hardware figures | read through the MCP server on the live box, not from a spec sheet |
 | Failure mode | read from the traceback's own frame, not inferred from the symptom |
+| dtype comparison | one shape (8192³), one process, 30 iterations, 5 warm-up, same buffers cast per dtype |
 
 ## What Was Not Controlled
 
-- **Throughput was not measured.** Nothing here is a benchmark. The KV figure is vLLM's own allocation report; the only other rate quoted is a 557.7 TFLOP/s bare-metal fp16 matmul at 8192³, which is a smoke test, not a benchmark.
+- **Serving throughput was not measured.** Nothing here is a serving benchmark. The KV figure is vLLM's own allocation report, and no tokens/sec number is claimed.
+- **The dtype table is a GEMM ratio, not an end-to-end result.** One matmul shape, on a card that was concurrently serving — which is why every absolute rate sits near half of peak and why the ratios, not the TFLOP/s, are what is claimed. A 1.77x on `torch._scaled_mm` does **not** imply 1.77x tokens/sec: attention and kernel-launch overhead do not shrink with the weights, and for a 2B model they are a large share of decode.
+- **The int8 result is about this software stack, not about CDNA 3.** `torch._int_mm` at 17.4% of peak says a tuned kernel was not reached. A different library, or a hand-written MFMA path, could plausibly close it; that was not attempted.
+- **fp8 was measured, not deployed.** The serving arm ran bf16 throughout. No quality evaluation of fp8 on this checkpoint was run, and small models have less redundancy to spend on quantization than large ones.
 - **The 8 GiB accounting gap was not explained**, only reported from both sides.
-- **The 0.19.1 arm was not run to completion.** It reached `Application startup complete` and was torn down to free the card.
 - **One nightly build.** `af1c0149` on 2026-09-16. Nightlies rebuild daily and this conclusion has a shelf life.
 - **VF, not bare metal.** 191.69 GiB exposed on a virtual function; partitioning on a bare card was not examined.
 - **One droplet, one tag.** The tag scoping is tested against a mocked API, not against a second real droplet.
@@ -326,5 +399,8 @@ Text, thinking, tool calling and vision were each exercised against the live end
 - **A fixture written from memory tests your memory.** The VRAM column read `-` for hours because the summariser and its unit test both used a key name no machine emits; the real one is `GPU Memory Allocated (VRAM%)`.
 - **One reboot fixes a freshly provisioned GPU droplet.** `/dev/kfd` is missing until you reboot once, and nothing needs installing.
 - **Powering off does not stop the billing.** Only destroying the droplet does.
-- **The newest vendor vLLM image cannot load Gemma 4** — no `Gemma4ModelArchConfigConvertor`, so `head_dim` raises during config parsing. The container nightly can, and is 26 GB smaller.
-- **191.69 GiB, 304 CUs, PCIe Gen5 x16**, and 9,026,017 tokens of KV at 275x concurrency on one card.
+- **fp8 `e4m3fnuz` is the only format on this card faster than bf16** — 1.77x measured. bf16 and fp16 are one pipeline at one peak, so there is no choice between them.
+- **int8 is rated identically to fp8 and measured 0.69x bf16.** An equal number in a spec table is not an equal number on the machine.
+- **fp4 does not exist on `gfx942`** — `supports_mx()` gates it to `gfx950`/`gfx1250`, and the fallback emulation kernel dequantizes to bf16 every forward pass. `mxfp4` in a capability list is not a hardware claim.
+- **`e4m3fnuz` is not `e4m3fn`.** One bit pattern means 2.0 on an H100 and 1.0 here, 448 becomes `NaN`, and an fp8 checkpoint built for NVIDIA is not drop-in. Quantize online from bf16.
+- **191.69 GiB, 304 CUs, PCIe Gen5 x16**, and 9,026,017 tokens of KV at 275x concurrency on one card — all of it at bf16, with the 1.77x still unclaimed.

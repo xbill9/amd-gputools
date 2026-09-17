@@ -1,0 +1,22 @@
+Captured 2026-09-16 inside the vllm container, torch 2.12.0+rocm10.0.0, gfx942:sramecc+:xnack-.
+8192^3 matmul, 30 iterations, card concurrently serving. Verbatim script output.
+
+         dtype       ms    TFLOP/s  spec peak  % peak  vs bf16
+          bf16    1.655      664.3     1307.4   50.8%    1.00x
+          fp16    1.660      662.5     1307.4   50.7%    1.00x
+  fp8_e4m3fnuz    0.938     1172.5     2614.9   44.8%    1.77x
+          int8    2.413      455.6     2614.9   17.4%    0.69x
+
+dtype probes:
+float8_e4m3fn: FAILED -> RuntimeError: CUDA error: HIPBLAS_STATUS_NOT_SUPPORTED
+float8_e4m3fnuz: _scaled_mm OK  out=(4096, 4096) torch.bfloat16
+int8 _int_mm OK out=(4096, 4096) torch.int32
+fp8_dtype: torch.float8_e4m3fnuz
+on_gfx942 = True | on_gfx950 = False | supports_mx() = False | supports_fp8() = True
+fp4 _scaled_mm FAILED -> NotImplementedError: Block-wise scaling for Float8_e8m0fnu is only supported on gfx950,gfx1250
+'gguf' registered globally: False ; ggml/gguf symbols in _custom_ops: NONE
+
+bandwidth, bare metal torch 2.9.1+rocm6.4:
+copy: 2.00 GiB moved in 0.572 ms -> 3.756 TB/s
+total_VRAM=191.7 GiB  free_now=19.7 GiB  used_now=172.0 GiB
+shader_cores(stream_processors)=19456  matrix_cores=1216  CUs=304

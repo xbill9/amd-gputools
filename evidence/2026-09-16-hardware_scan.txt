@@ -1,0 +1,51 @@
+Captured 2026-09-16 via mcp__amd-gputools__hardware_scan on
+debian-gpu-mi300x1-192gb-devcloud-atl1 (droplet id 601142018). Verbatim tool output.
+
+- hostname: debian-gpu-mi300x1-192gb-devcloud-atl1
+- kernel: 6.12.94+deb13-amd64
+- os: Debian GNU/Linux 13 (trixie)
+- uptime: up 5 hours, 13 minutes
+- cpu: INTEL(R) XEON(R) PLATINUM 8568Y+
+- cores: 20
+- ram: 236 GB
+- disk free /: 595G
+- `/dev/kfd`: present
+- amdgpu module: loaded
+- pci: 83:00.0 Processing accelerators [1200]: Advanced Micro Devices, Inc. [AMD/ATI] Aqua Vanjaram [Instinct MI300X VF] [1002:74b5]
+- gfx targets: gfx942  (1 GPU agent(s))
+- device: AMD Instinct MI300X VF
+- vram: card0,205822885888,180717051904
+- VBIOS version: 113-M3000108-103
+- SMC firmware version: 00.85.129.03
+- MEC firmware version: 32948
+- RLC firmware version: 65
+- SDMA firmware version: 24
+- TA RAS firmware version: 27.54.02.18
+- TA XGMI firmware version: 32.00.00.20
+- present (9): rocm-smi, rocminfo, amd-smi, clinfo, docker, python3, pip3, git, tmux
+- missing (2): hipcc, podman
+- ROCM-SMI version: 2.2.0+unknown
+- ROCM-SMI-LIB version: 7.2.0
+- Docker version 26.1.5+dfsg1, build a72d7cd
+- Python 3.13.5
+- /opt/rocm-sdk
+ROCm packages (8):
+firmware-amd-graphics   20250410-2
+libdrm-amdgpu1:amd64    2.4.124-2
+libhsa-runtime64-1:amd64        6.1.2-3
+libhsakmt1:amd64        6.2.4+ds-1
+librocm-smi64-1 6.1.2-1
+rocm-smi        6.1.2-1
+rocminfo        6.1.2-2
+whiptail        0.52.25-1
+Python:
+- torch 2.9.1+rocm6.4 hip 6.4.43484-123eb5128 avail True
+- ModuleNotFoundError: No module named 'vllm'
+
+--- apt-cache policy hipcc, same box, same day ---
+hipcc:
+  Installed: (none)
+  Candidate: 5.7.1-6+deb13u1
+  Version table:
+     5.7.1-6+deb13u1 500
+        500 mirror+file:/etc/apt/mirrors/debian.list trixie/main amd64 Packages

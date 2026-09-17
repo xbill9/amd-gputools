@@ -1,0 +1,56 @@
+Captured 2026-09-16 on debian-gpu-mi300x1-192gb-devcloud-atl1 (droplet 601142018) via
+run_on_droplet, and from the DigitalOcean v2 API via the amd-gputools MCP server. Verbatim.
+
+--- rocm-smi --showmeminfo all ---
+GPU[0]          : VRAM Total Memory (B): 205822885888
+GPU[0]          : VRAM Total Used Memory (B): 184850968576
+GPU[0]          : VIS_VRAM Total Memory (B): 205822885888
+GPU[0]          : VIS_VRAM Total Used Memory (B): 184850968576
+GPU[0]          : GTT Total Memory (B): 126676250624
+GPU[0]          : GTT Total Used Memory (B): 21327872
+(VRAM used varies with workload; the 180717051904 figure in the article is the
+ point-in-time reading from the same day's hardware_scan, archived separately.)
+
+--- lspci -vvs 83:00.0 ---
+        Region 0: Memory at 4000000000 (64-bit, prefetchable) [size=256G]
+        Region 2: Memory at 8000000000 (64-bit, prefetchable) [size=2M]
+        Region 5: Memory at fd800000 (32-bit, non-prefetchable) [size=2M]
+                LnkSta: Speed 32GT/s, Width x16
+
+--- lscpu / df ---
+CPU(s):                                  20
+Thread(s) per core:                      1
+Core(s) per socket:                      20
+Socket(s):                               1
+L1d cache:                               640 KiB (20 instances)
+L2 cache:                                80 MiB (20 instances)
+NUMA node(s):                            1
+/dev/vda1       709G   86G  595G  13% /
+
+--- amd-smi static -g 0 ---
+    VRAM:
+        TYPE: HBM
+        SIZE: 196288 MB
+
+--- vLLM startup memory accounting (docker logs vllm) ---
+GPU KV cache size: 9,026,017 tokens, Maximum concurrency for 32,768 tokens per request: 275.45x
+Free memory on device (191.36/191.69 GiB) on startup. Desired GPU memory utilization is
+(0.9, 172.52 GiB). Actual usage is 11.88 GiB for consumed memory (weights + non-torch),
+5.59 GiB for peak activation, and 3.9 GiB for CUDAGraph memory. Replace gpu_memory_utilization
+config with `--kv-cache-memory=162134778676` (151.0 GiB) to fit into requested memory, or
+`--kv-cache-memory=182368940032` (169.84 GiB) to fully utilize gpu memory. Current kv cache
+memory in use is 155.04 GiB.
+init engine (profile, create kv cache, warmup model) took 84.91 s (compilation: 30.98 s)
+
+--- droplet_status 601142018 (DigitalOcean v2 API) ---
+- status: `active`
+- size: `gpu-mi300x1-192gb-devcloud` - 20 vCPU, 240 GB RAM, 720 GB disk
+- region: atl1
+- image: debian-13-x64
+- created: 2026-09-16T18:09:45Z
+
+--- list_gpu_sizes("mi300") (GET /v2/sizes) ---
+| `gpu-mi300x1-192gb`   | 20  | 240  | 720  | $2.590/hr ($1,927/mo) |
+| `gpu-mi300x8-1536gb`  | 160 | 1920 | 2046 | $20.720/hr ($15,416/mo) |
+Note: `gpu-mi300x1-192gb-devcloud`, the slug this droplet actually runs, is NOT in
+GET /v2/sizes. Its $1.99/hr rate comes from AMD Developer Cloud, not the DO API.

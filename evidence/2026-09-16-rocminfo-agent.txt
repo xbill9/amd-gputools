@@ -1,0 +1,26 @@
+Captured 2026-09-16 via run_on_droplet, `rocminfo` agent stanza. Verbatim.
+
+Name:                    gfx942
+Uuid:                    GPU-2896ede4ddd2a8b6
+Marketing Name:          AMD Instinct MI300X VF
+  L1:                      32(0x20) KB
+  L2:                      4096(0x1000) KB
+  L3:                      262144(0x40000) KB
+Chip ID:                 29877(0x74b5)
+Cacheline Size:          128(0x80)
+Max Clock Freq. (MHz):   2100
+Compute Unit:            304
+SIMDs per CU:            4
+Shader Engines:          32
+Wavefront Size:          64(0x40)
+Workgroup Max Size:      1024(0x400)
+Max Waves Per CU:        32(0x20)
+Pool 1 Segment: GLOBAL; FLAGS: COARSE GRAINED  Size: 200998912(0xbfb0000) KB
+Pool 2 Segment: GLOBAL; FLAGS: EXTENDED FINE GRAINED  Size: 200998912(0xbfb0000) KB
+
+rocm-smi clocks/memory, same capture:
+GPU[0]          : mclk clock level: 1: (1100Mhz)
+GPU[0]          : sclk clock level: 1: (1016Mhz)
+GPU[0]          : GPU Memory Allocated (VRAM%): 87
+GPU[0]          : VRAM Total Memory (B): 205822885888
+GPU[0]          : VRAM Total Used Memory (B): 180717051904

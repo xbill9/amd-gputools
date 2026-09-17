@@ -1,0 +1,27 @@
+Captured 2026-09-16 from the live vLLM container on the droplet. Verbatim.
+
+Container: vllm/vllm-openai-rocm:nightly-rocm100, name `vllm`, Up 3 hours
+cmd: google/gemma-4-E2B-it --host 0.0.0.0 --port 8000 --max-model-len 32768
+     --gpu-memory-utilization 0.90 --enable-auto-tool-choice --reasoning-parser gemma4
+     --tool-call-parser gemma4 --limit-mm-per-prompt {"image": 4, "audio": 0} --async-scheduling
+
+Engine config: v0.29.1rc1.dev187+gaf1c01499, model='google/gemma-4-E2B-it',
+dtype=torch.bfloat16, max_seq_len=32768, quantization=None, kv_cache_dtype=auto,
+enable_prefix_caching=True, enable_chunked_prefill=True
+Attention: Using TRITON_ATTN backend
+checkpoint config.json: dtype bfloat16, model_type gemma4, Gemma4ForConditionalGeneration
+hf cache: /opt/hf-cache/hub 9.6G
+
+vllm bench serve, concurrency 1, random_input_len 8192, random_output_len 128, 8 prompts:
+Benchmark duration (s):                  5.21
+Total input tokens:                      65536
+Total generated tokens:                  1024
+Request throughput (req/s):              1.54
+Output token throughput (tok/s):         196.58
+Total token throughput (tok/s):          12777.40
+Mean TTFT (ms):                          154.05
+Mean TPOT (ms):                          3.91
+
+server log under bench load:
+Avg prompt throughput: 1331.0 tokens/s, Avg generation throughput: 1543.9 tokens/s,
+Running: 63 reqs, GPU KV cache usage: 0.2%

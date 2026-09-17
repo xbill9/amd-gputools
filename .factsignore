@@ -1,0 +1,12 @@
+# The devcloud hourly rate is not in GET /v2/sizes -- the article says so explicitly and
+# list_gpu_sizes evidence shows the public catalogue at $2.59 instead. $1.99 comes from AMD
+# Developer Cloud's own billing, for which there is no API artifact to archive.
+$1.99
+
+# Arithmetic, and labelled as arithmetic in the text: the footnote states that rocm-smi
+# reports 87 and that the division gives 87.8%.
+87.8%
+
+# Not a measurement of this box: a reference to the legacy 256 MB PCI BAR aperture that
+# large-BAR configurations removed. This card's actual Region 0 is measured at 256G.
+256 MB

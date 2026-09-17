@@ -187,7 +187,10 @@ transformers >= 5.15 reports that as a per-layer attribute and raises on a globa
 and vLLM's `getattr(..., 0)` default cannot catch it. The 0.19.1 image above works from
 the other side, since transformers 5.8.1 predates per-layer attributes — so **the broken
 build sits between the two that work**, and the pip channel vLLM's own recipe names is
-staler than all three at 0.20.2rc1. `devto-gemma4-mi300x-vllm.md` has the comparison.
+staler than all three at 0.20.2rc1. The three-image comparison table now lives in the
+companion article `~/gemma4-dev/gpu-vllm-mi300x-2b/devto-gemma4-mi300x-mcp.md`, which is
+the deployment write-up; `devto-gemma4-mi300x-vllm.md` is the card-and-control-plane
+article and keeps only a prose summary of the finding.
 
 Check before pulling 35-62 GB: run the candidate image's `python3` and print
 `MODEL_ARCH_CONFIG_CONVERTORS.get("gemma4")` plus `torch.cuda.get_arch_list()`. Import
