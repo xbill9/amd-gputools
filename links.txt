@@ -2,3 +2,4 @@ devto-gde = https://dev.to/gde/an-mi300x-over-mcp-what-the-matrix-cores-execute-
 repo = https://github.com/xbill9/amd-gputools
 medium = https://xbill999.medium.com/managing-amd-mi300x-deployments-with-mcp-318d0ab116c8
 devcommunity = https://devcommunity.amd.com/t/which-numeric-formats-an-mi300x-actually-executes-measured-on-a-developer-cloud-droplet/1043
+linkedin = https://www.linkedin.com/feed/update/urn:li:share:7506447489198301184/
