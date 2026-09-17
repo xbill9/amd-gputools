@@ -183,7 +183,7 @@
   </style>
 </head>
 <body>
-<figure><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-cover.403ae80c.jpg" alt="An MI300X Over MCP: What the Matrix Cores Execute, and What They Don&#x27;t" /></figure>
+<figure><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-cover.403ae80c.jpg" alt="An MI300X Over MCP: What the Matrix Cores Execute, and What They Don&#x27;t" /></figure>
 <p>This article provides a step by step inventory and measurement of a
 single AMD Instinct MI300X on an AMD Developer Cloud hosted GPU enabled
 system. A suite of Python MCP tools is built to simplify management of
@@ -224,13 +224,13 @@ the server with a bare <code>python3</code>.</li>
 <code>hardware_scan</code>, <code>rocminfo</code> and <code>lspci</code>
 through the MCP server, on 2026-09-16.</p>
 <p><strong>Host</strong></p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-1.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-1.png"
 alt="Table: CPU, Cores, Cache, NUMA" /></p>
 <p><strong>GPU</strong></p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-2.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-2.png"
 alt="Table: Device, Target, Compute, Clock" /></p>
 <p><strong>GPU memory</strong> — the numbers that decide what fits:</p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-3.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-3.png"
 alt="Table: Pool, Total, Used" /></p>
 <p>† 87 is what <code>rocm-smi</code> reports; the division gives 87.8%.
 The tool truncates, and this article quotes the tool.</p>
@@ -502,7 +502,7 @@ on npm, there is a hosted endpoint at
 local process at all, and the droplet area alone exposes 40 tools across
 24 service areas. Seven of the twelve tools here have a direct
 equivalent in it.</p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-4.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-4.png"
 alt="Table: this server, official" /></p>
 <p>The four with no equivalent are the four that produced every
 measurement in this article. <strong>The official server is a
@@ -546,7 +546,7 @@ question a spec sheet answers least reliably.</p>
 <p>Measured on the card 2026-09-16: 8192³ matmul, 30 iterations, torch
 2.12.0+rocm10.0.0. The card was concurrently serving, so the absolute
 rates are depressed and <strong>the ratios are the result</strong>.</p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-5.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-5.png"
 alt="Table: dtype, ms, TFLOP/s, Spec peak, % of peak, vs bf16" /></p>
 <p>Four readings, and three of them contradict something plausible.</p>
 <p><strong>bf16 and fp16 are the same number because they are the same
@@ -597,7 +597,7 @@ bought, and it is not a serving path.</p>
 like the short path. It is not. <strong>CDNA 3 implements a different
 fp8 than Hopper and Blackwell do.</strong> From <code>torch.finfo</code>
 on this box:</p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-6.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-6.png"
 alt="Table: e4m3fn (NVIDIA, OCP), e4m3fnuz (CDNA 3)" /></p>
 <p>The exponent bias differs by one. The cleanest way to see what that
 means is to read a single byte as both types:</p>
@@ -625,7 +625,7 @@ run them.</p>
 All</h4>
 <p>Worth stating because it fails differently from everything above —
 not gated, absent:</p>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-7.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-7.png"
 alt="Table: Check, Result" /></p>
 <p>Older builds accepted <code>--quantization gguf</code>; this one has
 no such module. GGUF here means changing inference engine rather than
@@ -671,7 +671,7 @@ in use is 155.04 GiB.
 GPU KV cache size: 9,026,017 tokens
 Maximum concurrency for 32,768 tokens per request: 275.45x
 init engine (profile, create kv cache, warmup model) took 84.91 s (compilation: 30.98 s)</code></pre>
-<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-8.png"
+<p><img src="https://cdn.jsdelivr.net/gh/xbill9/amd-gputools@main/medium/img/devto-gemma4-mi300x-vllm-table-8.png"
 alt="Table: Claim, GiB" /></p>
 <p>The two disagree by about 8 GiB, and they are measured in different
 places — vLLM reports its own profiling arithmetic,
