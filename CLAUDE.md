@@ -162,13 +162,47 @@ A newer container ROCm than the host's is fine: ROCm **7.13** userspace in the i
 drives the host's in-tree **6.12** `amdgpu` correctly, reporting "AMD Instinct MI300X
 VF" and 304 CUs. Only the kernel driver and `/dev/kfd` come from the host.
 
-Verified 2026-09-16: image 44.3 GB unpacked, vLLM 0.19.1 serving Qwen2.5-7B-Instruct
-**84 seconds** after container start, `max_model_len` 32768, 186.6 GB of the 191.7 GB
-VRAM preallocated at the default `gpu_memory_utilization`.
+Verified 2026-09-16, twice. First: image 44.3 GB unpacked, vLLM 0.19.1 serving
+Qwen2.5-7B-Instruct **84 seconds** after container start, `max_model_len` 32768,
+186.6 GB of the 191.7 GB VRAM preallocated at the default `gpu_memory_utilization`.
+Then the box was moved to its actual job — `google/gemma-4-E2B-it` on
+`vllm/vllm-openai-rocm:nightly-rocm100` (vLLM 0.29.1rc1.dev187, torch 2.12.0+rocm10.0.0,
+transformers 5.17.0), 9,026,017 tokens of KV at `max_model_len` 32768 and 275.45x
+concurrency, with text, thinking, tool calling and vision all verified live.
 
-The default model is deliberately ungated. A gated repo (every Gemma one, Llama) turns
-a first run into a Hugging Face login problem instead of a vLLM problem; set `HF_TOKEN`
-in `.env` and switch `VLLM_MODEL` once the path itself is known to work.
+**With Gemma 4, newer is not safer.** `rocm/vllm:rocm10.0.0_..._vllm_0.27.0` is the
+newest image AMD publishes and it **cannot load the model at all**: it lacks
+`Gemma4ModelArchConfigConvertor`, so config parsing raises
+`AmbiguousGlobalPerLayerAttributeError` on `head_dim` before the GPU is touched. Gemma 4
+runs 256-wide heads on its sliding-attention layers and 512 on its full-attention ones;
+transformers >= 5.15 reports that as a per-layer attribute and raises on a global read,
+and vLLM's `getattr(..., 0)` default cannot catch it. The 0.19.1 image above works from
+the other side, since transformers 5.8.1 predates per-layer attributes — so **the broken
+build sits between the two that work**, and the pip channel vLLM's own recipe names is
+staler than all three at 0.20.2rc1. `devto-gemma4-mi300x-vllm.md` has the comparison.
+
+Check before pulling 35-62 GB: run the candidate image's `python3` and print
+`MODEL_ARCH_CONFIG_CONVERTORS.get("gemma4")` plus `torch.cuda.get_arch_list()`. Import
+`vllm.config` first, or a circular-import `ImportError` makes a good image look broken,
+and map `/dev/kfd` and `/dev/dri` in, or `get_arch_list()` returns `[]` and looks like a
+build with no kernels for you.
+
+**The two images take different argv.** `vllm/vllm-openai-rocm` sets
+`ENTRYPOINT ["vllm","serve"]`, so the model id is the first argument; AMD's images have
+no entrypoint and need `vllm serve` spelled out. `vllm/docker-serve.sh` keys off the
+image name.
+
+**Audio is unreachable on every ROCm image tried.** E2B has a conformer audio encoder,
+but none of these images ships the `vllm[audio]` extras — `librosa` and `soundfile` are
+absent — so audio fails at request time whatever `--limit-mm-per-prompt` says. That is
+why `LIMIT_MM_PER_PROMPT` sets `audio: 0`; it also skips allocating encoder memory for a
+path that cannot be used. Audio needs a derived image, not a flag.
+
+The default model is still deliberately ungated: a gated repo (Llama, and every Gemma
+one before Gemma 4) turns a first run into a Hugging Face login problem instead of a
+vLLM problem. `google/gemma-4-E2B-it` is Apache-2.0 and ungated, so it keeps that
+property while being the thing this box is actually for. Set `HF_TOKEN` in `.env` if you
+switch `VLLM_MODEL` to something gated.
 
 ## Not a gemma4-dev rig
 

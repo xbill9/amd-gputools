@@ -1,5 +1,9 @@
 #!/bin/bash
-# Serve a model with vLLM on the droplet's MI300X, using AMD's rocm/vllm image.
+# Serve a model with vLLM on the droplet's MI300X.
+#
+# Defaults to google/gemma-4-E2B-it on a vllm/vllm-openai-rocm nightly, and
+# handles AMD's rocm/vllm images too — they differ in whether the image's
+# ENTRYPOINT already runs `vllm serve`. See the SERVE_ARGV block below.
 #
 #   vllm/docker-serve.sh              # start, using VLLM_MODEL from amd.env
 #   vllm/docker-serve.sh --stop       # stop and remove the container
@@ -25,10 +29,14 @@ for envfile in "$HERE/../amd.env" "$HERE/../.env"; do
   fi
 done
 
-VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+VLLM_MODEL="${VLLM_MODEL:-google/gemma-4-E2B-it}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_IMAGE="${VLLM_IMAGE:?VLLM_IMAGE is not set — see amd.env}"
 HF_CACHE="${HF_CACHE:-/opt/hf-cache}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
+LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-}"
+CHAT_TEMPLATE="${CHAT_TEMPLATE:-}"
 NAME="vllm"
 
 die() { echo "docker-serve: $*" >&2; exit 1; }
@@ -79,6 +87,32 @@ echo "→ model $VLLM_MODEL on :$VLLM_PORT"
 # need shared memory larger than docker's default 64 MB.
 VIDEO_GID="$(getent group video | cut -d: -f3)"
 RENDER_GID="$(getent group render | cut -d: -f3)"
+
+# TWO ENTRYPOINT SHAPES, AND THE IMAGE DECIDES WHICH.
+#
+# vllm/vllm-openai-rocm sets ENTRYPOINT ["vllm","serve"], so the model id is the
+# FIRST ARGUMENT and repeating the subcommand is an unrecognised-arguments
+# error. AMD's rocm/vllm images have no entrypoint at all and need `vllm serve`
+# spelled out, where passing the bare model id is "vllm: command not found".
+SERVE_ARGV=()
+case "$VLLM_IMAGE" in
+  vllm/*) ;;                       # entrypoint already runs `vllm serve`
+  *) SERVE_ARGV+=(vllm serve) ;;   # vendor image: spell the subcommand out
+esac
+SERVE_ARGV+=("$VLLM_MODEL" --host 0.0.0.0 --port 8000)
+SERVE_ARGV+=(--max-model-len "$MAX_MODEL_LEN")
+SERVE_ARGV+=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+
+# Gemma 4 needs its own reasoning and tool-call parsers to expose thinking and
+# function calling over the OpenAI API. Harmless on a model that has neither
+# only because they are opt-in — drop them if you point this at something else.
+case "$VLLM_MODEL" in
+  *gemma-4*|*gemma4*)
+    SERVE_ARGV+=(--enable-auto-tool-choice --reasoning-parser gemma4 --tool-call-parser gemma4)
+    [ -n "$CHAT_TEMPLATE" ] && SERVE_ARGV+=(--chat-template "$CHAT_TEMPLATE")
+    [ -n "$LIMIT_MM_PER_PROMPT" ] && SERVE_ARGV+=(--limit-mm-per-prompt "$LIMIT_MM_PER_PROMPT")
+    ;;
+esac
 docker run -d --name "$NAME" \
   --device=/dev/kfd --device=/dev/dri \
   ${VIDEO_GID:+--group-add "$VIDEO_GID"} ${RENDER_GID:+--group-add "$RENDER_GID"} \
@@ -89,6 +123,6 @@ docker run -d --name "$NAME" \
   -p "${VLLM_PORT}:8000" \
   --restart unless-stopped \
   "$VLLM_IMAGE" \
-  vllm serve "$VLLM_MODEL" --host 0.0.0.0 --port 8000
+  "${SERVE_ARGV[@]}"
 
 echo "📡 started. Weights download and load take minutes; poll with --status."
