@@ -4,7 +4,7 @@ published: false
 series: Gemma4
 description: "One AMD Instinct MI300X on AMD Developer Cloud, managed entirely through a tag-scoped Python MCP server, with every figure read off the card rather than a spec sheet. fp8 e4m3fnuz runs 1.77x bf16; int8, which AMD rates identically to fp8, runs 0.69x; fp4 is not on this silicon at all. One droplet, $1.99 an hour, and two readings that were wrong the first time."
 tags: amd, mcp, rocm, machinelearning
-cover_image: https://raw.githubusercontent.com/xbill9/amd-gputools/main/devto-cover.376dac15.jpg
+cover_image: https://raw.githubusercontent.com/xbill9/amd-gputools/main/devto-cover.403ae80c.jpg
 ---
 
 This article provides a step by step inventory and measurement of a single AMD Instinct MI300X on an AMD Developer Cloud hosted GPU enabled system. A suite of Python MCP tools is built to simplify management of the droplet, and the same server is used to read the card's native numeric format support off the hardware.
