@@ -1228,6 +1228,49 @@ async def prepare_droplet(droplet: str, pull_image: bool = True, image: Optional
         return _error(exc)
 
 
+def _kv(lines: list[str]) -> dict:
+    """Parse `key=value` report lines from a remote script section."""
+    out: dict = {}
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep:
+            out[key.strip()] = value.strip()
+    return out
+
+
+async def _gfx_agents(ip: str) -> Optional[int]:
+    """Count the gfx agents rocminfo reports, or None if it could not be asked.
+
+    This is the bind check, and `test -e /dev/kfd` is not: the node and
+    /dev/dri/renderD128 are created before amdgpu finishes probing, so both
+    survive a bind that failed. Only an agent in rocminfo means the card is
+    usable.
+    """
+    probe = r"rocminfo 2>/dev/null | grep -cE '^[[:space:]]*Name:[[:space:]]*gfx[0-9a-f]+[[:space:]]*$'"
+    code, out, err = await run_command(_ssh_argv(ip, probe), timeout=90)
+    if _ssh_transport_error(code, err):
+        return None
+    digits = out.strip()
+    return int(digits) if digits.isdigit() else None
+
+
+async def _wait_for_ssh(ip: str, timeout_s: int = 300) -> bool:
+    """Poll until the droplet answers ssh again, or the deadline passes.
+
+    A rebooting droplet refuses connections for a while and the API still calls
+    it `active` throughout, so there is nothing to poll on the API side that
+    means what is wanted here.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        code, _, err = await run_command(_ssh_argv(ip, "true"), timeout=20)
+        if code == 0 and not _ssh_transport_error(code, err):
+            return True
+        await asyncio.sleep(10)
+    return False
+
+
 async def _start_pull(ip: str, image: str) -> str:
     """Kick off the detached pull and say what the droplet made of the request."""
     script = _PULL_START_SCRIPT.replace("__IMAGE__", image).replace("__LOG__", PULL_LOG)
@@ -1244,6 +1287,144 @@ async def _start_pull(ip: str, image: str) -> str:
         f"These images are 35-62 GB, so this runs for minutes with nothing to see. "
         f"Poll `vllm_image_status`; the log is at `{PULL_LOG}` on the droplet."
     )
+
+
+@mcp.tool(title="Scaffold a droplet end to end", annotations=WRITE)
+async def scaffold_droplet(
+    droplet: str,
+    pull_image: bool = True,
+    reboot: bool = True,
+    image: Optional[str] = None,
+) -> str:
+    """Take a bare droplet all the way to a working GPU, in one call.
+
+    `prepare_droplet` is the first half of this and stops where it gets
+    interesting: it installs everything and hands back a droplet whose card has
+    still not bound. This runs the same preparation, then reads the verdict,
+    reboots if the card needs it, waits for the droplet to come back, and
+    checks again — which is the part that decides whether the box is usable.
+
+    **A stock droplet fails to bind in two different ways and they need
+    different fixes.** With no firmware installed, dmesg says `failed to load
+    amdgpu/gc_9_4_3_rlc.bin (-2)` and `early_init of IP block <gfx_v9_4_3>
+    failed -19`; /lib/firmware/amdgpu holds zero files, and the blobs live in
+    `firmware-amd-graphics` in the `non-free-firmware` component — so the
+    component has to be enabled before the fix is installable at all. With
+    firmware present but a fresh boot, the card simply has not attached yet and
+    a reboot is the whole answer. From `/dev/kfd` the two look identical, so
+    this reports which one it found rather than rebooting and hoping.
+
+    Equivalent to `./scaffold-droplet.sh`, and it sends the same
+    `scaffold/remote-prepare.sh`. Idempotent: on an already-scaffolded droplet
+    it changes nothing, skips the reboot and reports the card as already bound,
+    which makes it usable as a health check.
+
+    Runs for several minutes — apt alone is a few — so expect a long call. The
+    image pull stays detached and is polled with `vllm_image_status`.
+    """
+    try:
+        item = await _resolve(droplet)
+        name = item.get("name")
+        ip, why_not = await _reachable(item)
+        if why_not:
+            return f"❌ Cannot reach `{name}`: {why_not}"
+
+        report = [f"# Scaffolded `{name}`", ""]
+
+        # 1. Preparation, from the file the shell driver also sends.
+        script = _with_env(
+            _read_script("remote-prepare.sh"),
+            APT_COMPONENTS=APT_COMPONENTS,
+            SETUP_PACKAGES=SETUP_PACKAGES,
+            BACKPORTS_PACKAGES=BACKPORTS_PACKAGES,
+        )
+        code, out, err = await run_command(_ssh_argv(ip, script), timeout=1200)
+        transport = _ssh_transport_error(code, err)
+        if transport:
+            return f"❌ Cannot reach `{name}` over SSH at {ip}.\n\n```\n{transport}\n```"
+        sec = _sections(out)
+        if not sec:
+            return f"❌ Preparation returned nothing from `{name}` (exit {code}).\n\n```\n{err[:600]}\n```"
+
+        before = " ".join(sec.get("before", []))
+        after = " ".join(sec.get("sources", []))
+        changed = []
+        if "contrib" not in before and "contrib" in after:
+            changed.append("apt components")
+        if "-backports" not in before and "-backports" in after:
+            changed.append("backports suite")
+        report += [
+            "## Preparation",
+            "",
+            f"- apt: {', '.join(changed) or 'already configured'}"
+            + ("" if "-backports" not in before else " (backports was already enabled)"),
+        ]
+        for line in sec.get("docker", []):
+            report.append(f"- {line.strip()}")
+        gids = _kv(sec.get("gids", []))
+        if gids:
+            report.append(f"- GPU group GIDs: {', '.join(f'`{k}:{v}`' for k, v in gids.items())}")
+
+        # 2. The verdict. Firmware count and agent count together say which of
+        #    the two bind failures this is; neither alone does.
+        gpu = _kv(sec.get("gpu", []))
+        agents = gpu.get("gfx_agents", "?")
+        blobs = gpu.get("firmware_blobs", "?")
+        report += [
+            "",
+            "## GPU",
+            "",
+            f"- gfx agents: **{agents}**",
+            f"- firmware blobs in `/lib/firmware/amdgpu`: **{blobs}**",
+            f"- `/dev/kfd`: {gpu.get('kfd', '?')} — which proves nothing on its own",
+            f"- verdict: {gpu.get('verdict', '(none)')}",
+        ]
+
+        if agents not in ("0", "?"):
+            report.append("")
+            report.append("✅ The card is bound and usable. No reboot needed.")
+        elif not reboot:
+            report.append("")
+            report.append("🛑 The card has not bound and reboot=false, so it was left alone. It is unusable.")
+        else:
+            report += ["", "## Reboot", ""]
+            if blobs == "0":
+                report.append(
+                    "The firmware was missing and has just been installed, so this reboot is the "
+                    "second half of that fix rather than a retry."
+                )
+            body = await _api("POST", f"/droplets/{item['id']}/actions", {"type": "reboot"})
+            action = body.get("action", {})
+            report.append(f"- action `{action.get('id')}` is `{action.get('status')}`")
+            await asyncio.sleep(15)
+            if not await _wait_for_ssh(ip, timeout_s=420):
+                report.append("- ❌ the droplet did not answer ssh within 7 minutes")
+                return "\n".join(report)
+            again = await _gfx_agents(ip)
+            report.append(f"- after reboot: **{again if again is not None else '?'}** gfx agent(s)")
+            if again:
+                report.append("")
+                report.append("✅ The card came up. `gpu_status` and `hardware_scan` will report it now.")
+            else:
+                report.append("")
+                report.append(
+                    "❌ Still no gfx agent after a reboot. Check dmesg for `Doesn't get msg:1 from pf` "
+                    "(PF handshake) or `gc_9_4_3_rlc.bin (-2)` (firmware still absent) — they are "
+                    "different problems."
+                )
+                return "\n".join(report)
+
+        # 3. The image, detached because it is 35-62 GB.
+        wanted = (image or VLLM_IMAGE).strip()
+        report += ["", "## vLLM image", ""]
+        report.append(
+            await _start_pull(ip, wanted)
+            if pull_image
+            else f"Not pulled (pull_image=false). `{wanted}` when you want it."
+        )
+        return "\n".join(report)
+    except Exception as exc:
+        return _error(exc)
 
 
 @mcp.tool(title="Check the vLLM image pull", annotations=READ_ONLY)
@@ -1377,6 +1558,11 @@ async def get_help() -> str:
     for tool in tools:
         lines.append(f"- **{tool.name}** — {(tool.description or '').splitlines()[0]}")
     lines += [
+        "",
+        (
+            "`scaffold_droplet` is the one call that takes a bare droplet to a working GPU; "
+            "`prepare_droplet` is its first half if you want to stop before the reboot."
+        ),
         "",
         (
             "`create_droplet` orders nothing until it is called a second time with confirm=true, and it "

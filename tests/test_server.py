@@ -896,6 +896,118 @@ class SharedScaffoldScriptTests(unittest.TestCase):
         self.assertNotIn("test -e /dev/kfd", driver)
 
 
+class ScaffoldDropletTests(unittest.IsolatedAsyncioTestCase):
+    """One call from bare droplet to bound card, including the reboot."""
+
+    BOUND = PrepareDropletTests.PREPARED.replace(
+        "<<<rocm>>>\n1\n",
+        "<<<gpu>>>\ngfx_agents=1\nkfd=present\npci=1\nfirmware_blobs=552\nverdict=ok\n",
+    )
+    NO_FIRMWARE = PrepareDropletTests.PREPARED.replace(
+        "<<<rocm>>>\n1\n",
+        "<<<gpu>>>\ngfx_agents=0\nkfd=present\npci=1\nfirmware_blobs=0\n"
+        "verdict=no GPU firmware installed — install firmware-amd-graphics from non-free-firmware, then reboot\n",
+    )
+    UNBOUND = PrepareDropletTests.PREPARED.replace(
+        "<<<rocm>>>\n1\n",
+        "<<<gpu>>>\ngfx_agents=0\nkfd=present\npci=1\nfirmware_blobs=552\n"
+        "verdict=amdgpu did not bind — reboot once; firmware is present, so nothing needs installing\n",
+    )
+
+    async def _scaffold(self, scan, after_reboot="1", **kwargs):
+        calls = []
+        actions = []
+
+        async def fake_run_command(cmd, timeout=120):
+            remote = cmd[-1]
+            calls.append(remote)
+            # The prepare script is checked FIRST because it contains a rocminfo
+            # grep of its own; matching on rocminfo before this fed the scan
+            # fixture to the wrong branch and every assertion read "returned
+            # nothing".
+            if "say()" in remote:
+                return (0, scan, "")
+            if "docker pull" in remote:
+                return (0, "STARTED pid=1", "")
+            if "rocminfo" in remote:
+                return (0, f"{after_reboot}\n", "")
+            return (0, "", "")
+
+        async def fake_api(method, path, payload=None, timeout=30):
+            actions.append(payload["type"])
+            return {"action": {"id": 99, "status": "in-progress"}}
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                with patch.object(server, "_api", fake_api):
+                    with patch.object(server.asyncio, "sleep", AsyncMock()):
+                        result = await server.scaffold_droplet("mi300-1", **kwargs)
+        return result, calls, actions
+
+    async def test_a_bound_card_is_not_rebooted(self):
+        """Idempotence: re-running against a healthy droplet must not cycle it."""
+        result, _, actions = await self._scaffold(self.BOUND)
+        self.assertEqual(actions, [], "a working droplet was rebooted")
+        self.assertIn("No reboot needed", result)
+
+    async def test_an_unbound_card_is_rebooted_and_rechecked(self):
+        result, _, actions = await self._scaffold(self.UNBOUND)
+        self.assertEqual(actions, ["reboot"])
+        self.assertIn("after reboot: **1**", result)
+        self.assertIn("came up", result)
+
+    async def test_missing_firmware_is_named_as_the_cause_not_just_rebooted(self):
+        """The two bind failures need different fixes and look alike from /dev/kfd."""
+        result, _, _ = await self._scaffold(self.NO_FIRMWARE)
+        self.assertIn("firmware", result.lower())
+        self.assertIn("second half of that fix", result)
+
+    async def test_a_reboot_that_does_not_help_says_which_two_causes_to_check(self):
+        result, _, _ = await self._scaffold(self.UNBOUND, after_reboot="0")
+        self.assertIn("Still no gfx agent", result)
+        self.assertIn("msg:1 from pf", result)
+        self.assertIn("gc_9_4_3_rlc.bin", result)
+
+    async def test_reboot_false_reports_the_card_as_unusable(self):
+        result, _, actions = await self._scaffold(self.UNBOUND, reboot=False)
+        self.assertEqual(actions, [])
+        self.assertIn("unusable", result)
+
+    async def test_the_pull_is_skipped_when_the_card_never_came_up(self):
+        """Pulling 35 GB onto a box whose GPU does not work wastes minutes."""
+        result, calls, _ = await self._scaffold(self.UNBOUND, after_reboot="0")
+        self.assertNotIn("docker pull", " ".join(calls))
+
+    async def test_it_sends_the_same_shared_script(self):
+        _, calls, _ = await self._scaffold(self.BOUND)
+        self.assertTrue(
+            any("firmware_blobs" in c for c in calls),
+            "scaffold_droplet did not send scaffold/remote-prepare.sh",
+        )
+
+    async def test_kfd_is_reported_as_proving_nothing(self):
+        result, _, _ = await self._scaffold(self.BOUND)
+        self.assertIn("proves nothing", result)
+
+
+class GfxAgentHelperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unreachable_returns_none_not_zero(self):
+        """None is "could not ask"; 0 is "asked, and the card did not bind"."""
+
+        async def fake(cmd, timeout=120):
+            return (255, "", "ssh: connect to host 203.0.113.7 port 22: Connection refused")
+
+        with patch.object(server, "run_command", fake):
+            self.assertIsNone(await server._gfx_agents("203.0.113.7"))
+
+    async def test_a_count_is_returned_as_an_int(self):
+        async def fake(cmd, timeout=120):
+            return (0, "1\n", "")
+
+        with patch.object(server, "run_command", fake):
+            self.assertEqual(await server._gfx_agents("203.0.113.7"), 1)
+
+
 class RegistrationTests(unittest.TestCase):
     """The server key prefixes every tool name, so the four places must agree."""
 

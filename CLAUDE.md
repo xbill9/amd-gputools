@@ -159,10 +159,19 @@ bind* — and `scaffold/remote-prepare.sh` goes one better by also counting
 `Doesn't get msg:1 from pf` and `gc_9_4_3_rlc.bin (-2)` are not, they are the two
 failures above.
 
-### Re-scaffolding: `./scaffold-droplet.sh`
+### Re-scaffolding: `scaffold_droplet` or `./scaffold-droplet.sh`
 
-One command takes a bare droplet to ready-to-serve, and it is idempotent, so it doubles
-as a health check:
+Two front ends, one behaviour. **`mcp__amd-gputools__scaffold_droplet` is the one call
+that takes a bare droplet to a working GPU**: it prepares the box, reads the verdict,
+reboots if the card needs it, waits for the droplet to come back and checks again.
+`prepare_droplet` is only its first half — it installs everything and hands back a
+droplet whose card has still not bound, which is where this went wrong the first time.
+Both are idempotent; against a healthy droplet `scaffold_droplet` reboots nothing,
+pulls nothing and reports the card as already bound, so it works as a health check.
+
+It also declines to pull 35-62 GB onto a box whose GPU never came up.
+
+The shell equivalent, for when the MCP server is not loaded:
 
 ```
 ./scaffold-droplet.sh              # apt, firmware, docker, reboot if needed, pull the image
