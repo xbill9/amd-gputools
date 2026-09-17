@@ -212,6 +212,54 @@ vLLM problem. `google/gemma-4-E2B-it` is Apache-2.0 and ungated, so it keeps tha
 property while being the thing this box is actually for. Set `HF_TOKEN` in `.env` if you
 switch `VLLM_MODEL` to something gated.
 
+## Quantization: fp8 is the only win on this card
+
+Measured 2026-09-16 in the serving container (torch 2.12.0+rocm10.0.0, vLLM 0.29.1rc1), 8192³
+matmul, 30 iterations, **while the card was also serving live traffic** — so the absolute rates
+are depressed and the ratios are the result.
+
+| dtype | TFLOP/s | % of spec peak | vs bf16 |
+| --- | ---: | ---: | ---: |
+| bf16 | 664.3 | 50.8% | 1.00x |
+| fp16 | 662.5 | 50.7% | 1.00x |
+| **fp8 `e4m3fnuz`** | **1172.5** | 44.8% | **1.77x** |
+| int8 | 455.6 | 17.4% | **0.69x** |
+
+- **bf16 is the baseline and fp16 is not a change.** Both go through the same CDNA 3 matrix cores
+  at the same 1307.4 TFLOP/s peak. Gemma 4's config says `dtype: bfloat16` and the engine confirms
+  `dtype=torch.bfloat16, quantization=None`. Moving to fp16 costs dynamic range and buys nothing.
+- **int8 measured *slower than bf16*** — 0.69x, 17% of its own 2614.9 TOPS peak — even though the
+  spec gives int8 and fp8 the same peak. `torch._int_mm` is not reaching tuned kernels on this
+  stack. Do not reach for int8 here on the strength of the spec sheet.
+- **fp8 is `e4m3fnuz`, not `e4m3fn`, and that is a trap rather than a detail.** `float8_e4m3fn` —
+  the OCP flavour every NVIDIA checkpoint is published in — does not merely run slowly here, it
+  raises `RuntimeError: HIPBLAS_STATUS_NOT_SUPPORTED`. vLLM agrees from its own side:
+  `is_fp8_fnuz()` keys on `"gfx94"` and `fp8_dtype()` returns `torch.float8_e4m3fnuz`. **An fp8
+  checkpoint built for H100 is therefore not drop-in.** Quantize online from the bf16 weights with
+  `--quantization fp8` instead of hunting for a checkpoint.
+- **fp4 does not exist on gfx942.** torch names the allowlist in its own error: `Block-wise scaling
+  for Float8_e8m0fnu is only supported on gfx950,gfx1250`. You cannot even cast to it — `copy_()
+  does not support casting Float4_e2m1fn_x2 to different types`. vLLM gates it identically:
+  `supports_mx()` is `any(gfx in _GCN_ARCH for gfx in ["gfx95", "gfx1250"])`, which is **False**
+  here. `mxfp4` appearing in `supported_quantization` is a generic list, not a hardware claim.
+- **vLLM's mxfp4 emulation is a research instrument, not a deployment path.** With `supports_mx()`
+  False the kernel is `EmulationMxfp4LinearKernel.apply_weights`: `dequant_mxfp4(...)` widens the
+  weights back to bf16 *on every forward pass*, activations go through quantize-dequantize, and
+  `F.linear` runs at bf16. Bf16 speed, no resident-memory saving during compute, plus dequant
+  overhead and the full fp4 error. It answers "would this model survive fp4" before buying MI355X.
+- **GGUF is compiled out of the image entirely.** Not gated — absent. `'gguf'` is not in
+  `QUANTIZATION_METHODS` (the global registry, not the platform list),
+  `vllm.model_executor.layers.quantization.gguf` is `ModuleNotFoundError`, and there are **no**
+  ggml/gguf symbols in `vllm._custom_ops`. GGUF here means changing inference engine, not adding
+  a flag.
+- **The 4-bit that does work is weight-only.** `awq`/`gptq` are in the registry and
+  `awq_dequantize` is compiled in. Storage and bandwidth only — the matmul is still bf16. With a
+  ~2B model on 192 GB and KV cache at 0.2% utilisation there is no memory pressure to relieve, so
+  it buys nothing here.
+
+The attention backend in use is `TRITON_ATTN`, not AITER; `VLLM_ROCM_USE_AITER=1` is a separate
+and so far untested lever.
+
 ## Not a gemma4-dev rig
 
 This project borrows conventions from `~/gemma4-dev` but is not one of its rigs. The
