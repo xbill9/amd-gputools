@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>An MI300X Over MCP: What the Matrix Cores Execute, and What They Don't</title>
+  <meta name="description" content="One AMD Instinct MI300X on AMD Developer Cloud, managed entirely through a tag-scoped Python MCP server, with every figure read off the card rather than a spec sheet. fp8 e4m3fnuz runs 1.77x bf16; int8, which AMD rates identically to fp8, runs 0.69x; fp4 is not on this silicon at all. One droplet, $1.99 an hour, and two readings that were wrong the first time." />
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <style>
+    body{font-family:-apple-system,'Segoe UI',Roboto,'Liberation Sans',Arial,sans-serif;
+         font-size:18px;line-height:1.58;max-width:42em;color:#242424;}
+    h1,h2,h3,h4{font-weight:700;line-height:1.25;margin-top:1.8em;}
+    h4{font-size:1.25em;}
+    img{max-width:100%;height:auto;display:block;margin:1.6em 0;}
+    pre{background:#f7f7f7;border:1px solid #e6e6e6;border-radius:4px;
+        padding:12px 14px;overflow-x:auto;font-size:14px;line-height:1.45;}
+    code{font-family:'Liberation Mono',Menlo,Consolas,monospace;}
+    :not(pre)>code{background:#f2f2f2;padding:1px 5px;border-radius:3px;font-size:.9em;}
+    blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#555;}
+    hr{border:0;border-top:1px solid #e6e6e6;margin:2.4em 0;}
+  </style>
+</head>
+<body>
+<figure><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-cover.403ae80c.jpg" alt="An MI300X Over MCP: What the Matrix Cores Execute, and What They Don&#x27;t" /></figure>
+<p>This article provides a step by step inventory and measurement of a
+single AMD Instinct MI300X on an AMD Developer Cloud hosted GPU enabled
+system. A suite of Python MCP tools is built to simplify management of
+the droplet, and the same server is used to read the card's native
+numeric format support off the hardware.</p>
+<p><a
+href="https://github.com/xbill9/amd-gputools">https://github.com/xbill9/amd-gputools</a></p>
+<p>The workstation writing this has no AMD GPU and never will. The
+hardware is one MI300X droplet billed at $1.99 an hour, and everything
+that reaches it goes through twelve tag-scoped MCP tools for inventory,
+power, reboot, hardware scan, GPU state and remote execution.</p>
+<p>Two of the readings those tools returned were wrong the first time,
+and both were corrected by parsing output instead of trusting a status.
+The format table at the end disagrees with AMD's published peaks in two
+places, and the disagreement is the result rather than a footnote to
+it.</p>
+<h4 id="prerequisites">Prerequisites</h4>
+<ul>
+<li>An AMD Developer Cloud account with a GPU droplet already created.
+<code>devcloud.amd.com</code> is DigitalOcean underneath — same v2 API,
+same droplet ids — and the token comes from the <strong>My AMD
+Team</strong> account, not a personal DigitalOcean one.</li>
+<li>The droplet tagged. Every lookup in this server is scoped by
+<code>tag_name</code>, so an untagged droplet is invisible to it and a
+tagged one belonging to someone else is not.</li>
+<li><code>DIGITALOCEAN_ACCESS_TOKEN</code> in the environment, or in a
+mode 0600 <code>.env</code>, or in <code>~/ocean.txt</code>. The same
+order is used by the server and by <code>ssh-droplet.sh</code>.</li>
+<li>An SSH key on the droplet as <code>root</code>.
+<code>BatchMode=yes</code> throughout, so a wrong key fails rather than
+waiting on a password prompt.</li>
+<li>Python 3 with <code>httpx</code> and <code>python-dotenv</code> in
+the system interpreter. No virtualenv — <code>.mcp.json</code> launches
+the server with a bare <code>python3</code>.</li>
+</ul>
+<h4 id="the-box-in-detail">The Box, In Detail</h4>
+<p>Everything in these three tables was read off the machine by
+<code>hardware_scan</code>, <code>rocminfo</code> and <code>lspci</code>
+through the MCP server, on 2026-09-16.</p>
+<p><strong>Host</strong></p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-1.png"
+alt="Table: CPU, Cores, Cache, NUMA" /></p>
+<p><strong>GPU</strong></p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-2.png"
+alt="Table: Device, Target, Compute, Clock" /></p>
+<p><strong>GPU memory</strong> — the numbers that decide what fits:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-3.png"
+alt="Table: Pool, Total, Used" /></p>
+<p>† 87 is what <code>rocm-smi</code> reports; the division gives 87.8%.
+The tool truncates, and this article quotes the tool.</p>
+<p>Two things worth reading off that table. <strong>VIS_VRAM equals
+VRAM</strong>: this is a large-BAR configuration, the entire 191.69 GiB
+is CPU-mappable, and no part of the framebuffer is hidden behind the old
+256 MB window. And <code>rocminfo</code> reports three GLOBAL pools —
+coarse grained, fine grained and extended fine grained — each at
+200,998,912 KB, which is the same 191.69 GiB described three ways, not
+three separate allocations.</p>
+<p>The "VF" matters. This is a virtualized MI300X, not a bare card:
+firmware queries like ASD, PFP, MES and SOS answer <em>"Not supported on
+the given system"</em>, and <code>amd-smi</code> cannot see
+partitioning. MEC (32948), RLC (65), SDMA (24), SMC and the RAS/XGMI TAs
+do report.</p>
+<h4 id="the-control-plane-twelve-tools-tag-scoped">The Control Plane:
+Twelve Tools, Tag-Scoped</h4>
+<p><code>get_help</code> is the tool that describes the others, and its
+real output is the shape of the whole server:</p>
+<pre><code>📡 amd-gputools — DigitalOcean control plane for this project&#39;s AMD MI300 droplets.
+ 
+Scoped to droplets tagged `gemma`; SSH as `root`; checkout at `/opt/amd-gputools`.
+ 
+- list_droplets   — List every droplet tagged for this project, with state and address.
+- droplet_status  — Show one tagged droplet in detail, by numeric id or by name.
+- start_droplet   — Power on a tagged droplet. No-op if it is already active.
+- stop_droplet    — Power off a tagged droplet.
+- reboot_droplet  — Reboot a tagged droplet.
+- action_status   — Poll a droplet action returned by start_droplet or stop_droplet.
+- ssh_command     — Print the ssh command for a tagged droplet, with its current address.
+- run_on_droplet  — Run one shell command on a tagged droplet over SSH and return its output.
+- gpu_status      — Report the AMD GPUs on a tagged droplet, and say why if there are none.
+- hardware_scan   — Inventory a droplet: host, GPU, firmware, ROCm packages and installed tools.
+- list_gpu_sizes  — List DigitalOcean GPU droplet sizes and their prices, cheapest first.
+- get_help        — List the tools this server exposes.
+ 
+No create or destroy tools, by design: both are dollar-per-hour decisions, so they stay a
+deliberate step in the DigitalOcean console.
+ 
+Powering a droplet off does not stop DigitalOcean billing it.</code></pre>
+<p>Three design decisions are visible in that text.</p>
+<p><strong>Every lookup is scoped by tag.</strong> The server resolves
+droplets through <code>GET /v2/droplets?tag_name=gemma</code>, so a tool
+cannot name, reboot or power off a droplet nobody tagged for it. The
+token in use is an account token with full reach; the tag is what keeps
+a reboot from landing on someone else's box.</p>
+<p><strong>There is no create and no destroy.</strong> Not an oversight.
+Creating an MI300X starts a meter and destroying one throws away state,
+and neither is a thing a model should be one tool call away from. The
+console is a fine place for a decision that costs dollars per hour.</p>
+<p><strong>Powering off does not stop the billing.</strong> This is the
+misconception the server exists to correct, so it is written into the
+tool output rather than a README. DigitalOcean reserves the resources of
+a stopped droplet and charges the full rate; only destroying it stops
+the meter. <code>stop_droplet</code> says so in its return value every
+time, and a test enforces that the word survives refactoring.</p>
+<h4 id="worked-example-1-inventory">Worked Example 1: Inventory</h4>
+<p><code>list_droplets</code> takes no arguments. What comes back is the
+table, already tallied:</p>
+<pre><code>| Droplet | ID | Size | Status | Public IP | Region |
+| --- | --- | --- | --- | --- | --- |
+| `debian-gpu-mi300x1-192gb-devcloud-atl1` | `601142018` | gpu-mi300x1-192gb-devcloud | active | 165.245.134.217 | atl1 |
+ 
+📡 1 droplet(s) tagged `gemma`: 1 active.</code></pre>
+<p>The last line is the point. <strong>The tool counts; the model
+quotes.</strong> One droplet is trivially countable by eye, but the same
+code path handles twenty, and a model asked to count twenty rows is a
+coin flip. Every tool in this server that returns rows also returns the
+tally — <code>list_gpu_sizes</code> sorts and names the cheapest,
+<code>hardware_scan</code> counts present and missing tools,
+<code>gpu_status</code> counts cards.</p>
+<p><code>droplet_status 601142018</code> drills in, and ends with the
+sentence that costs money:</p>
+<pre><code>**debian-gpu-mi300x1-192gb-devcloud-atl1** (`601142018`)
+ 
+- status: `active`
+- size: `gpu-mi300x1-192gb-devcloud` — 20 vCPU, 240 GB RAM, 720 GB disk
+- region: atl1
+- image: debian-13-x64
+- public IPv4: 165.245.134.217
+- tags: gemma
+- created: 2026-09-16T18:09:45Z
+ 
+✅ Reachable as `root@165.245.134.217`. Billing is running.</code></pre>
+<p>Note what is <em>not</em> here: a hardcoded IP anywhere in the
+server. Every tool resolves the address per call. A rebuilt droplet gets
+a new one, and a cached address turns into an SSH timeout that reads
+like a dead GPU.</p>
+<h4 id="worked-example-2-one-round-trip-for-the-whole-box">Worked
+Example 2: One Round Trip For The Whole Box</h4>
+<p><code>hardware_scan</code> answers "what can this box actually run"
+in a single SSH round trip, instead of ten tool calls that each pay
+connection setup. It ships one shell script that prints
+<code>&lt;&lt;&lt;marker&gt;&gt;&gt;</code>-fenced sections, and the
+server parses them into a report. Abridged real output:</p>
+<pre><code>## GPU
+ 
+- `/dev/kfd`: **present**
+- amdgpu module: loaded
+- pci: `83:00.0 Processing accelerators [1200]: ... [Instinct MI300X VF] [1002:74b5]`
+- gfx targets: `gfx942`  (1 GPU agent(s))
+- device: AMD Instinct MI300X VF
+- vram: `card0,205822885888,180717051904`
+ 
+## Tools
+ 
+- present (9): `rocm-smi`, `rocminfo`, `amd-smi`, `clinfo`, `docker`, `python3`, `pip3`, `git`, `tmux`
+- **missing (2)**: `hipcc`, `podman`
+- ROCM-SMI version: 2.2.0+unknown
+- ROCM-SMI-LIB version: 7.2.0
+ 
+## ROCm packages (8)
+ 
+libhsa-runtime64-1:amd64  6.1.2-3
+librocm-smi64-1           6.1.2-1
+rocm-smi                  6.1.2-1
+rocminfo                  6.1.2-2
+ 
+## Python
+ 
+- torch 2.9.1+rocm6.4 hip 6.4.43484-123eb5128 avail True
+- ModuleNotFoundError: No module named &#39;vllm&#39;</code></pre>
+<p>That last pair of lines is the whole vLLM-on-ROCm situation in two
+lines: <strong>torch is installed and sees the GPU; vLLM is not
+installed and cannot be.</strong> There is no prebuilt vLLM wheel for
+ROCm — PyPI's are CUDA builds, AMD's manylinux index carries torch and
+triton but no vllm, and building from source needs <code>hipcc</code>
+plus <code>rocblas</code>, <code>hipblaslt</code>, <code>miopen</code>
+and <code>rccl</code>, of which Debian 13 ships exactly one
+(<code>hipcc</code> 5.7.1, and the scan shows even that is absent here).
+vLLM comes from a container on this box, and the scan is what proves it
+rather than asserts it.</p>
+<p>One parsing detail that cost a wrong number: <code>rocminfo</code>
+uses the key <code>Name:</code> for both the agent
+(<code>Name: gfx942</code>) and its ISA
+(<code>Name: amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-</code>). Matching
+on <code>gfx</code> alone counts one MI300X as <strong>two GPU
+agents</strong>. The scan only counts a bare
+<code>gfx&lt;digits&gt;</code> target.</p>
+<h4 id="worked-example-3-the-reboot-that-is-the-fix">Worked Example 3:
+The Reboot That Is The Fix</h4>
+<p>A freshly provisioned GPU droplet here does not work, and looks like
+a driver problem. <code>lspci</code> shows the card.
+<code>/dev/dri/renderD128</code> exists. <code>/dev/kfd</code> does not,
+because <code>amdgpu</code> failed to bind the VF and unloaded itself.
+Nothing needs installing — Debian's in-tree <code>amdgpu</code> and the
+ROCm 6.1.2 userspace on the image are enough.</p>
+<pre><code>reboot_droplet(&quot;601142018&quot;)
+ 
+📡 Rebooting `debian-gpu-mi300x1-192gb-devcloud-atl1` (`601142018`). Action `&lt;id&gt;` is
+`in-progress`.
+ 
+Poll `action_status`; SSH came back about 20s after the action completed when this was
+measured. Then check `gpu_status`.</code></pre>
+<p>The action id in that reply is what <code>action_status</code> then
+polls, until the reboot action reports <code>completed</code> with its
+start and finish timestamps. The sequence is three calls and no
+guessing: reboot, poll, <code>gpu_status</code>.</p>
+<p>An hour went into diagnosing a driver stack that was fine, which is
+why that instruction now lives in the tool's own docstring where a model
+will read it before it starts debugging. These dmesg lines are benign on
+a VF and are <em>not</em> the problem:
+<code>failed to load amdgpu/psp_13_0_6_cap.bin (-2)</code>,
+<code>Unsupported TA type: 8</code>,
+<code>TMZ feature not supported</code>.</p>
+<p>The tool refuses to reboot anything that is not <code>active</code>,
+pointing at <code>start_droplet</code> instead, and it is annotated
+<code>DESTRUCTIVE</code> in its MCP annotations — whatever is running on
+the card dies with the reboot.</p>
+<h4 id="worked-example-4-two-readings-that-were-wrong">Worked Example 4:
+Two Readings That Were Wrong</h4>
+<p>Both were corrected the same way, and neither would have been caught
+by piping <code>ssh rocm-smi</code> into a model.</p>
+<p><strong>The exit code is not a signal.</strong> With the driver
+uninitialised, <code>rocm-smi</code> printed
+<code>Driver not initialized (amdgpu not found in modules)</code> to
+<strong>stderr</strong>, printed nothing to stdout, and <strong>exited
+0</strong>. <code>amd-smi list</code> printed three ERROR lines and also
+exited 0. An early version of <code>gpu_status</code> branched on the
+exit status and reported <code>✅</code> above an empty table. Neither
+tool sets a useful exit code, so the current version does not consult
+the exit code at all: it parses <code>rocm-smi --json</code>, and if the
+parse does not yield at least one card it falls through to
+<code>amd-smi list</code>, and if that fails too it says so and explains
+why.</p>
+<p><strong>A key name taken from memory.</strong> On 2026-09-16
+<code>gpu_status</code> returned this, and it reads as an idle card with
+nothing running:</p>
+<pre><code>| Card | Product | GPU use % | VRAM used % |
+| --- | --- | --- | --- |
+| card0 | Aqua Vanjaram [Instinct MI300X VF] | 0 | - |
+ 
+📡 1 GPU(s) reported by rocm-smi.</code></pre>
+<p>The card was not idle. vLLM had been up for three hours holding
+<strong>168.31 GiB of the 191.69 GiB</strong>. The <code>-</code> came
+from the summariser looking up <code>GPU Memory Use (%)</code>, a
+spelling that does not exist. ROCM-SMI 2.2.0 on this box emits:</p>
+<pre class="json"><code>{&quot;card0&quot;: {&quot;Device Name&quot;: &quot;Aqua Vanjaram [Instinct MI300X VF]&quot;, &quot;GPU use (%)&quot;: &quot;0&quot;,
+           &quot;GPU Memory Allocated (VRAM%)&quot;: &quot;87&quot;, &quot;Card Series&quot;: &quot;Aqua Vanjaram [Instinct MI300X VF]&quot;}}</code></pre>
+<p><code>GPU Memory Allocated (VRAM%)</code>. The unit test that should
+have caught it used the invented key too, so it passed against a payload
+no machine produces. The fix is three words in a lookup list. <strong>A
+fixture written from memory tests the memory, not the tool</strong>, so
+the regression test now carries the verbatim payload above, and the
+fallback spellings stay for other rocm-smi builds.</p>
+<p>Both have the same shape: a successful-looking result from a tool
+that had failed. A model handed raw <code>rocm-smi</code> output
+reproduces both, because neither is visible without parsing what the
+tool printed. The control plane is where that parsing happens once.</p>
+<h4
+id="worked-example-5-driving-the-workload-over-the-same-server">Worked
+Example 5: Driving The Workload Over The Same Server</h4>
+<p><code>run_on_droplet</code> hands one command to the remote shell as
+a single argument — the local side never invokes a shell, and
+<code>BatchMode=yes</code> means a wrong key fails instead of hanging on
+a password prompt. It is how the workload gets checked:</p>
+<pre><code>run_on_droplet(&quot;601142018&quot;, &quot;docker ps --format &#39;{{.Names}}\t{{.Image}}\t{{.Status}}&#39;; curl -s localhost:8000/v1/models&quot;)
+ 
+✅ exited 0.
+ 
+vllm    vllm/vllm-openai-rocm:nightly-rocm100   Up 3 hours
+{&quot;object&quot;:&quot;list&quot;,&quot;data&quot;:[{&quot;id&quot;:&quot;google/gemma-4-E2B-it&quot;,&quot;max_model_len&quot;:32768,...}]}</code></pre>
+<p>And <code>list_gpu_sizes("mi300")</code> reads the catalogue rather
+than trusting a slug, which surfaces an oddity: <strong>the devcloud
+size this droplet runs is not in <code>GET /v2/sizes</code> at
+all.</strong> The public catalogue lists <code>gpu-mi300x1-192gb</code>
+at $2.59/hr; the droplet's own <code>size_slug</code> is
+<code>gpu-mi300x1-192gb-devcloud</code> at $1.99/hr, and it appears only
+on the droplet object. The tool shows the public catalogue and says
+which one it is showing.</p>
+<h4 id="rules-the-server-follows">Rules the Server Follows</h4>
+<p>Each of these came out of a specific failure:</p>
+<ul>
+<li><strong>Return markdown with an emoji prefix</strong> —
+<code>✅</code> success, <code>❌</code> error, <code>📡</code> in
+progress, <code>🛑</code> stopping. Never a dict, never raw JSON for the
+model to interpret.</li>
+<li><strong>Errors are returned, not raised.</strong> Every tool ends in
+<code>except Exception as exc: return _error(exc)</code>. An exception
+escaping a tool kills the server process for every later call in the
+session. A test walks the module and fails if any tool lacks the
+handler.</li>
+<li><strong>Never <code>shell=True</code>.</strong> Every subprocess
+goes through one <code>run_command(cmd: list[str])</code> using
+<code>asyncio.create_subprocess_exec</code>. A test greps the source to
+keep it that way.</li>
+<li><strong>Push the arithmetic into the tool.</strong> Counts, totals,
+sorts and the cheapest-size pick happen in Python. The model quotes a
+number it did not compute.</li>
+<li><strong>Put the measurement in the docstring.</strong>
+<code>reboot_droplet</code> explains the <code>/dev/kfd</code> symptom;
+<code>gpu_status</code> explains that the exit code is worthless and
+names the date it was measured. The docstring is the model's context
+window, and it is the cheapest place to prevent an hour of
+misdiagnosis.</li>
+<li><strong>Annotate write and destructive tools.</strong>
+<code>READ_ONLY</code>, <code>WRITE</code>, <code>DESTRUCTIVE</code> —
+so a client can gate the ones that cost money or kill a running
+job.</li>
+<li><strong>Tests run offline.</strong> The whole <code>mcp</code>
+package is mocked before <code>server</code> is imported, so no test
+needs a token or a network.</li>
+</ul>
+<h4 id="why-not-the-official-digitalocean-mcp-server">Why Not the
+Official DigitalOcean MCP Server?</h4>
+<p>DigitalOcean ships one. <code>@digitalocean/mcp</code> is at 1.0.70
+on npm, there is a hosted endpoint at
+<code>https://droplets.mcp.digitalocean.com/mcp</code> that needs no
+local process at all, and the droplet area alone exposes 40 tools across
+24 service areas. Seven of the twelve tools here have a direct
+equivalent in it.</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-4.png"
+alt="Table: this server, official" /></p>
+<p>The four with no equivalent are the four that produced every
+measurement in this article. <strong>The official server is a
+DigitalOcean API client, and the DigitalOcean API stops at the droplet
+object.</strong> Searching its repository for <code>ssh</code>,
+<code>exec</code>, <code>console</code>, <code>command</code> or
+<code>remote</code> returns nothing in the tree.</p>
+<p>Worked Example 3 is the clearest case. On a freshly provisioned
+droplet the v2 API reports <code>status: active</code> while the card is
+unusable, because <code>amdgpu</code> failed to bind the VF and
+unloaded, so <code>/dev/kfd</code> does not exist.
+<code>droplet-get</code> returns a healthy droplet in both states,
+because the difference is not in the droplet object.</p>
+<p>The size catalogue lands the same way. <code>size-list</code> reads
+<code>GET /v2/sizes</code>, which carries <code>gpu-mi300x1-192gb</code>
+at $2.59/hr and does not carry <code>gpu-mi300x1-192gb-devcloud</code>
+at all. Asked what this droplet costs, it has the wrong row available
+and the right one missing.</p>
+<p>One difference is a design choice rather than a gap. The official
+server has <code>droplet-create</code>, <code>droplet-delete</code>, and
+tag-based bulk actions including <code>power-off-droplets-tag</code>, so
+a tag there is a selector for acting on many droplets at once. Here a
+tag is a boundary: every lookup is scoped by <code>tag_name</code>, and
+an untagged droplet is not addressable by any tool in the server. Both
+are right for what they are for. One manages a fleet; this one manages a
+single card that bills at $1.99 an hour with a model resident in 168 GiB
+of its memory.</p>
+<p><strong>The two compose rather than compete.</strong> The account,
+the images, the volumes and the fleet belong to the official server, and
+there is no reason to reimplement any of it. What is worth writing
+yourself is the part past the API: remote execution, GPU state, and a
+hardware inventory that answers what the box can run rather than what it
+is billed as.</p>
+<h4 id="what-the-silicon-will-actually-compute">What The Silicon Will
+Actually Compute</h4>
+<p>The control plane exists to report what the box is. The most
+consequential thing it reports is not capacity — it is <strong>which
+numeric formats the matrix cores execute natively</strong>, because that
+decides every quantization choice made afterwards, and it is the
+question a spec sheet answers least reliably.</p>
+<p>Measured on the card 2026-09-16: 8192³ matmul, 30 iterations, torch
+2.12.0+rocm10.0.0. The card was concurrently serving, so the absolute
+rates are depressed and <strong>the ratios are the result</strong>.</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-5.png"
+alt="Table: dtype, ms, TFLOP/s, Spec peak, % of peak, vs bf16" /></p>
+<p>Four readings, and three of them contradict something plausible.</p>
+<p><strong>bf16 and fp16 are the same number because they are the same
+hardware.</strong> CDNA 3 runs both through one matrix pipeline at one
+peak of 1307.4 TFLOP/s. fp16 is not a cheaper precision you can trade
+down to here; it is the same speed with less exponent range. There is no
+decision to make between them.</p>
+<p><strong>fp8 is the only format on this card faster than bf16</strong>
+— 1.77x measured against 2.00x theoretical, which is what a genuinely
+native path looks like once the parts of a matmul that are not the
+multiply are accounted for.</p>
+<p><strong>int8 measured slower than bf16, and the spec says it should
+not have.</strong> AMD rates int8 at 2614.9 TOPS — exactly fp8's number,
+exactly double bf16's. On that basis the two are interchangeable and
+int8 is the better-supported choice. Measured, int8 reached 17.4% of its
+own peak and <strong>0.69x bf16</strong>. The silicon is not the
+problem; the kernels are, and <code>torch._int_mm</code> is not reaching
+a tuned path on this stack. <strong>An equal number in a spec table is
+not an equal number on the machine.</strong></p>
+<p><strong>fp4 is not present at all</strong>, and the capability list
+says otherwise. <code>supported_quantization</code> on this platform
+includes <code>mxfp4</code> and <code>mxfp8</code>, and torch 2.12
+defines <code>torch.float4_e2m1fn_x2</code>. Neither is a statement
+about this GPU. The hardware answers directly:</p>
+<pre><code>&gt;&gt;&gt; torch._scaled_mm(a4, b4, scale_a=s, scale_b=s, out_dtype=torch.bfloat16)
+NotImplementedError: Block-wise scaling for Float8_e8m0fnu is only supported on gfx950,gfx1250</code></pre>
+<p>vLLM gates on exactly the same boundary:</p>
+<pre class="python"><code>@classmethod
+def supports_mx(cls) -&gt; bool:
+    return any(gfx in _GCN_ARCH for gfx in [&quot;gfx95&quot;, &quot;gfx1250&quot;])</code></pre>
+<p><code>gfx942</code> is CDNA 3; MX formats arrive with CDNA 4
+(<code>gfx950</code>, MI350X/MI355X). Here <code>supports_mx()</code> is
+<code>False</code>, and rather than refusing, the stack falls back to an
+emulation kernel whose entire forward pass is:</p>
+<pre class="python"><code>dq_w  = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
+qdq_x = self.quant_dequant_func(x)
+return F.linear(qdq_x, dq_w, bias)</code></pre>
+<p>It widens the 4-bit weights back to bf16 <strong>on every forward
+pass</strong>, round-trips the activations through quantize-dequantize
+to reproduce fp4's error, and runs an ordinary bf16
+<code>F.linear</code>. The result is bf16 speed, no resident saving
+while computing, dequantization overhead on top, and the full
+quantization error. Its own log line calls it simulated. It answers
+whether a model survives fp4 before the hardware that runs fp4 is
+bought, and it is not a serving path.</p>
+<h4 id="fnuz-is-not-fn"><code>fnuz</code> Is Not <code>fn</code></h4>
+<p>fp8 being native makes a ready-made fp8 checkpoint from the Hub look
+like the short path. It is not. <strong>CDNA 3 implements a different
+fp8 than Hopper and Blackwell do.</strong> From <code>torch.finfo</code>
+on this box:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-6.png"
+alt="Table: e4m3fn (NVIDIA, OCP), e4m3fnuz (CDNA 3)" /></p>
+<p>The exponent bias differs by one. The cleanest way to see what that
+means is to read a single byte as both types:</p>
+<pre><code>bit pattern 0b01000000 as float8_e4m3fn   -&gt; 2.0
+bit pattern 0b01000000 as float8_e4m3fnuz -&gt; 1.0</code></pre>
+<p><strong>One bit pattern, two values, a factor of two apart.</strong>
+Reinterpreting an <code>e4m3fn</code> tensor as <code>e4m3fnuz</code>
+halves every number in it. At the top of the range it is worse than
+halved:</p>
+<pre><code>float8_e4m3fn   round-trip [1.0, 2.0, 240.0, 448.0] -&gt; [1.0, 2.0, 240.0, 448.0]
+float8_e4m3fnuz round-trip [1.0, 2.0, 240.0, 448.0] -&gt; [1.0, 2.0, 240.0, nan]</code></pre>
+<p>448 is an ordinary weight on an H100 and is <strong>NaN</strong> on
+an MI300X.</p>
+<p>Asking for the NVIDIA flavour fails at the call rather than
+silently:</p>
+<pre><code>float8_e4m3fn:   FAILED -&gt; RuntimeError: HIPBLAS_STATUS_NOT_SUPPORTED
+float8_e4m3fnuz: _scaled_mm OK  out=(4096, 4096) torch.bfloat16</code></pre>
+<p>vLLM agrees from its own side — <code>is_fp8_fnuz()</code> keys on
+the string <code>"gfx94"</code>, and <code>fp8_dtype()</code> returns
+<code>torch.float8_e4m3fnuz</code>. So the safe route is to quantize
+<strong>online, from the bf16 weights</strong>, and never to go looking
+for a checkpoint: the scales are then derived on the machine that will
+run them.</p>
+<h4 id="gguf-is-not-compiled-in-at-all">GGUF Is Not Compiled In At
+All</h4>
+<p>Worth stating because it fails differently from everything above —
+not gated, absent:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-7.png"
+alt="Table: Check, Result" /></p>
+<p>Older builds accepted <code>--quantization gguf</code>; this one has
+no such module. GGUF here means changing inference engine rather than
+passing a flag — and since its k-quants are weight-only anyway,
+dequantized in-kernel with the arithmetic still at bf16, it would not
+have unlocked a format the matrix cores lack.</p>
+<p><strong>The answer for this card is one line: fp8
+<code>e4m3fnuz</code>, quantized online, and nothing else.</strong>
+Three sources pointed elsewhere to get there — AMD's peak table rates
+int8 identically to fp8, the platform capability list includes
+<code>mxfp4</code>, and the Hub's fp8 checkpoints are the wrong
+flavour.</p>
+<h4 id="the-workload-briefly">The Workload, Briefly</h4>
+<p>The card is not idle hardware. It serves
+<code>google/gemma-4-E2B-it</code> through vLLM in a container, and that
+workload is what the memory figures below are measured against. The
+engine reports <code>dtype=torch.bfloat16, quantization=None</code>,
+matching the checkpoint's own <code>dtype: bfloat16</code> — so
+everything in this article is measured against an
+<strong>unquantized</strong> baseline, and the 1.77x above is available
+and unclaimed.</p>
+<p>The deployment itself is the subject of a companion article and is
+not repeated here. One finding from it carries across: <strong>the
+newest ROCm vLLM image AMD publishes cannot load Gemma 4 at
+all.</strong> It lacks <code>Gemma4ModelArchConfigConvertor</code>, so a
+<em>global</em> read of <code>head_dim</code> raises during config
+parsing, before the GPU is touched — Gemma 4 runs 256-wide heads on its
+sliding-attention layers and 512 on its full-attention ones, and
+transformers 5.15+ reports that as a per-layer attribute. The oldest
+image works because its transformers predates per-layer attributes; the
+nightly works because it has the convertor. <strong>The broken build
+sits between the two that work</strong>, which is not a thing version
+intuition predicts.</p>
+<h4 id="where-the-19169-gib-goes">Where The 191.69 GiB Goes</h4>
+<p>This is the number the control plane exists to report, so it is worth
+showing both sides of it. vLLM's own startup accounting for the serving
+run:</p>
+<pre><code>Free memory on device (191.36/191.69 GiB) on startup. Desired GPU memory utilization is
+(0.9, 172.52 GiB). Actual usage is 11.88 GiB for consumed memory (weights + non-torch),
+5.59 GiB for peak activation, and 3.9 GiB for CUDAGraph memory. Current kv cache memory
+in use is 155.04 GiB.
+ 
+GPU KV cache size: 9,026,017 tokens
+Maximum concurrency for 32,768 tokens per request: 275.45x
+init engine (profile, create kv cache, warmup model) took 84.91 s (compilation: 30.98 s)</code></pre>
+<p><img src="https://raw.githubusercontent.com/xbill9/amd-gputools/main/./medium/img/devto-gemma4-mi300x-vllm-table-8.png"
+alt="Table: Claim, GiB" /></p>
+<p>The two disagree by about 8 GiB, and they are measured in different
+places — vLLM reports its own profiling arithmetic,
+<code>rocm-smi</code> reports what the driver sees resident. Both are
+quoted here rather than reconciled, because no experiment was run to
+explain the gap.</p>
+<p>9,026,017 tokens of KV works out to roughly 18 KB per token at bf16:
+E2B shares KV across 20 of its 35 layers and runs one KV head at 256, so
+32k of context is cheap here. <code>--max-model-len 32768</code> is a
+workload choice, not a capacity one — the checkpoint supports 131072 and
+this card would hold it. vLLM also volunteers that
+<code>--kv-cache-memory=182368940032</code> (169.84 GiB) would fully use
+the card.</p>
+<p>Text, thinking, tool calling and vision were each exercised against
+the live endpoint — riddle with <code>reasoning</code> populated at 610
+reasoning tokens, a <code>get_weather</code> call returning
+<code>finish_reason: tool_calls</code>, and a 158-byte synthetic
+red/blue checkerboard described correctly. <strong>Audio is unreachable
+on every image tried</strong>: E2B carries a conformer audio encoder,
+but none of these images ships the <code>vllm[audio]</code> extras
+(<code>librosa</code> and <code>soundfile</code> are both missing), so
+<code>--limit-mm-per-prompt '{"audio": 0}'</code> is the setting that
+matches, and it also skips reserving encoder memory for a path that
+cannot be used.</p>
+<h4 id="what-this-does-not-cover">What This Does Not Cover</h4>
+<p>No serving throughput was measured. Nothing here is a serving
+benchmark: the KV figure is vLLM's own allocation report and no tokens
+per second number is claimed for the deployment.</p>
+<p>The dtype table is a GEMM ratio rather than an end to end result. One
+matmul shape, on a card that was concurrently serving, which is why
+every absolute rate sits near half of peak and why the ratios are what
+is claimed. A 1.77x on <code>torch._scaled_mm</code> does not imply
+1.77x tokens per second, because attention and kernel launch overhead do
+not shrink with the weights and for a 2B model they are a large share of
+decode.</p>
+<p>The int8 result is a statement about this software stack rather than
+about CDNA 3. <code>torch._int_mm</code> reaching 17.4 percent of its
+own peak says a tuned kernel was not found, and a different library or a
+hand written MFMA path could plausibly close it. That was not
+attempted.</p>
+<p>Three further gaps: fp8 was measured but never deployed, so the
+serving arm ran bf16 throughout and no output quality evaluation of fp8
+on this checkpoint exists; the 8 GiB accounting difference between vLLM
+and <code>rocm-smi</code> is reported from both sides and not explained;
+and the card is a virtual function, so 191.69 GiB is what SR-IOV exposes
+and partitioning on a bare card was not examined.</p>
+<h4 id="summary">Summary</h4>
+<p>The goal of this article was to manage one MI300X droplet entirely
+through MCP tools, and to read off the hardware which numeric formats
+its matrix cores execute. The key to the solution was parsing what each
+tool printed rather than branching on what it returned, and measuring
+every dtype on the card rather than reading a peak out of a table. The
+measured results were:</p>
+<ul>
+<li>fp8 <code>e4m3fnuz</code> is the only format on this card faster
+than bf16 — 1172.5 against 664.3 TFLOP/s, 1.77x, on an 8192³
+matmul.</li>
+<li>bf16 and fp16 are one pipeline at one peak, 664.3 and 662.5 TFLOP/s,
+so there is no choice to make between them.</li>
+<li>int8 is rated 2614.9 TOPS, identical to fp8 and double bf16, and
+measured 455.6 TFLOP/s. That is 17.4 percent of its own peak and 0.69x
+bf16.</li>
+<li>fp4 is not on <code>gfx942</code>. <code>supports_mx()</code> gates
+it to <code>gfx950</code> and <code>gfx1250</code>, and the fallback
+kernel dequantizes to bf16 on every forward pass.</li>
+<li><code>e4m3fnuz</code> is not <code>e4m3fn</code>. The same byte is
+2.0 on an H100 and 1.0 here, 448 round-trips to <code>NaN</code>, and an
+fp8 checkpoint built for NVIDIA is not drop-in. Quantize online from
+bf16.</li>
+<li><code>rocm-smi</code> and <code>amd-smi</code> exit 0 when they
+fail. Parse the output; never branch on status.</li>
+<li>The VRAM column read <code>-</code> for hours because the summariser
+and its unit test both used a key name no machine emits. The real one is
+<code>GPU Memory Allocated (VRAM%)</code>.</li>
+<li>A freshly provisioned droplet needs one reboot.
+<code>/dev/kfd</code> is missing until then and nothing needs
+installing.</li>
+<li>Powering a droplet off does not stop the billing. Only destroying it
+does.</li>
+<li>191.69 GiB, 304 CUs and PCIe Gen5 x16 on one card, holding 9,026,017
+tokens of KV at 275.45x concurrency — all of it at bf16, with the 1.77x
+available and unclaimed.</li>
+</ul>
+<p>Scope: one <code>gpu-mi300x1-192gb-devcloud</code> droplet in
+<code>atl1</code> on 2026-09-16, a virtual function exposing all 304 CUs
+and 191.69 GiB. The dtype figures are a single 8192³ shape, 30
+iterations after 5 warm-up, all four dtypes in one process against the
+same source buffers, measured inside the serving container on torch
+2.12.0+rocm10.0.0 while vLLM held the card — which depresses every
+absolute rate and is why the ratios are quoted rather than the TFLOP/s.
+The bandwidth figure is bare metal torch 2.9.1+rocm6.4, a different
+stack, and is not comparable to the dtype rows. Spec peaks are AMD's
+published numbers and are not measurements. The $1.99 rate comes from
+AMD Developer Cloud and is not in <code>GET /v2/sizes</code>, which
+lists the public <code>gpu-mi300x1-192gb</code> at $2.59 instead. Every
+host, GPU and memory figure was read through the MCP server on the live
+box; the archived output is in <code>evidence/</code>.</p>
+<p>The strategy for using MCP for single card platform management was
+validated with a incremental step by step approach.</p>
+</body>
+</html>

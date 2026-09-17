@@ -1,2 +1,2 @@
-devto_gde = https://dev.to/gde/an-mi300x-over-mcp-what-the-matrix-cores-execute-and-what-they-dont-1me9
+devto-gde = https://dev.to/gde/an-mi300x-over-mcp-what-the-matrix-cores-execute-and-what-they-dont-1me9
 repo = https://github.com/xbill9/amd-gputools
