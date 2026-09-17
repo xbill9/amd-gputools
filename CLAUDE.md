@@ -109,21 +109,35 @@ tool here.
   `GET /v2/regions`, which is another instance of the console knowing about capacity the
   public API does not.
 
-### A fresh droplet may or may not need a reboot — check `/dev/kfd`, don't guess
+### A freshly provisioned droplet needs one reboot — and `/dev/kfd` does not prove otherwise
 
 Verified working 2026-09-16 on the previous droplet: `gfx942`, AMD Instinct MI300X VF,
 304 CUs, 191.7 GiB VRAM, ISA `amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-`.
 
-**The missing-`/dev/kfd` condition is real but not universal.** On droplet `601142018`
-it was absent after provisioning: `lspci` showed the card and `/dev/dri/renderD128`
-existed, but `amdgpu` had failed to bind and unloaded, so no ROCm process could use it.
-One reboot fixed it and nothing needed installing — an hour went into diagnosing a
-driver stack that was fine. **On `601418522`, two minutes after creation, `/dev/kfd` was
-already present and `amdgpu` was loaded.** Same size, same region, same image.
+**`amdgpu` fails to bind the MI300X VF during provisioning, every time so far.** One
+reboot fixes it and nothing needs installing — an hour once went into diagnosing a
+driver stack that was fine.
 
-So the rule is check, then act: `hardware_scan` reports `/dev/kfd` in its GPU section,
-and `reboot_droplet` is the fix only when it says **ABSENT**. Rebooting reflexively
-costs a few minutes of a $1.99/hour machine for nothing.
+**What that looks like is not constant, and `/dev/kfd` is a bad test for it.** On
+`601142018` the node was absent. On `601418522` it was **present, with `amdgpu` in
+`lsmod`, and the card was still unusable** — `rocminfo` listed only the Xeon, `rocm-smi`
+said "No AMD GPUs specified", and dmesg showed the probe dying:
+
+```
+amdgpu 0000:83:00.0: amdgpu: Doesn't get msg:1 from pf, error=-62
+ amdgpu_virt_fini_data_exchange.cold  ← in amdgpu_pci_probe → amdgpu_device_fini_hw
+```
+
+`/dev/kfd` and `/dev/dri/renderD128` are created before that probe fails, so their
+existence means the driver core got that far and nothing more. A first pass at this
+file read "`/dev/kfd` present, `amdgpu` loaded" off `hardware_scan` and concluded no
+reboot was needed; the card had not bound at all.
+
+**The test that works is whether `rocminfo` reports a `gfx` agent.** `hardware_scan`
+now says so directly — it flags a card that is on the PCI bus with zero GPU agents as
+*did not bind* — and that is when `reboot_droplet` is the answer. The benign-looking
+dmesg lines further down are genuinely benign; `Doesn't get msg:1 from pf` is not one
+of them, it is this failure.
 
 **The stock image carries no ROCm userspace at all.** Measured on `601418522`: the
 only tool of the eleven probed that exists is `python3` (3.13.5). `rocm-smi`,
@@ -136,7 +150,9 @@ not a fault. Docker has to be installed before `vllm/docker-serve.sh` can run.
 
 These dmesg lines are benign on a VF and are not the problem: `failed to load
 amdgpu/psp_13_0_6_cap.bin (-2)`, `Unsupported TA type: 8`, `TMZ feature not
-supported`.
+supported`. **`Doesn't get msg:1 from pf, error=-62` is a different thing entirely** —
+that one is the bind failure above, and it appears alongside a stack trace through
+`amdgpu_pci_probe`.
 
 Once installed, ROCm here is the Debian packaging (`rocm-smi`, `rocminfo` in
 `/usr/bin`, ROCm 6.1.2), not AMD's own repo — there is no `/opt/rocm` and no

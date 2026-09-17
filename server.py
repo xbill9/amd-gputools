@@ -97,6 +97,17 @@ DROPLET_IMAGE = os.environ.get("DROPLET_IMAGE", "debian-13-x64")
 # account, never none: see _resolve_ssh_keys.
 DROPLET_SSH_KEYS = os.environ.get("DROPLET_SSH_KEYS", "")
 
+# prepare_droplet. The stock devcloud image is bare — of eleven tools probed on
+# a fresh droplet only python3 existed — so serving anything means installing
+# the userspace first. See amd.env for what each of these is and why.
+APT_COMPONENTS = os.environ.get("APT_COMPONENTS", "main contrib non-free non-free-firmware")
+SETUP_PACKAGES = os.environ.get(
+    "SETUP_PACKAGES",
+    "ca-certificates curl gnupg git tmux jq pciutils python3-pip docker.io docker-compose rocm-smi rocminfo",
+)
+VLLM_IMAGE = os.environ.get("VLLM_IMAGE", "vllm/vllm-openai-rocm:nightly-rocm100")
+PULL_LOG = os.environ.get("PULL_LOG", "/var/log/amd-gputools-pull.log")
+
 # Last-resort token file, matching ssh-droplet.sh so the shell script and the
 # server never disagree about where the token lives. A module constant rather
 # than an inline path so tests can point it somewhere that does not exist.
@@ -419,6 +430,147 @@ async def _create_preflight(size: str, region: str, image: str) -> tuple[list[st
 
     notes.append(f"- image `{image}`.")
     return notes, hourly
+
+
+# Sources are deb822 (/etc/apt/sources.list.d/debian.sources) and their URIs are
+# a DigitalOcean mirror indirection, `mirror+file:///etc/apt/mirrors/debian.list`.
+# So the file is EDITED IN PLACE and never appended to: dropping a classic
+# one-line `deb http://deb.debian.org/debian trixie-backports main` into
+# sources.list.d would bypass the mirror and duplicate a suite that is already
+# enabled. MEASURED 2026-09-17 on droplet 601418522, whose stock `Suites:` line
+# already read `trixie trixie-updates trixie-backports` — BACKPORTS WAS ALREADY
+# ON and only `Components: main` was short. The backports branch below is
+# therefore a fallback for an image that differs, not the normal path.
+#
+# Every step prints rather than failing the script: the interesting droplet is
+# the one where half of this does not apply, and a partial report beats none.
+_PREPARE_SCRIPT = r"""
+say() { printf '<<<%s>>>\n' "$1"; }
+SRC=/etc/apt/sources.list.d/debian.sources
+. /etc/os-release
+CODE="${VERSION_CODENAME:-trixie}"
+
+say before
+if [ -f "$SRC" ]; then grep -E '^(Suites|Components):' "$SRC"; else echo "MISSING $SRC"; fi
+
+say sources
+if [ -f "$SRC" ]; then
+  [ -f "$SRC.amd-gputools.bak" ] || cp -a "$SRC" "$SRC.amd-gputools.bak"
+  sed -i "s/^Components:.*/Components: __COMPONENTS__/" "$SRC"
+  grep -q -- "-backports" "$SRC" || sed -i "/^Suites: $CODE /s/\$/ $CODE-backports/" "$SRC"
+  grep -E '^(Suites|Components):' "$SRC"
+else
+  echo "deb822 sources file absent; apt was left alone"
+fi
+
+say update
+apt-get update -qq 2>&1 | tail -6
+echo "exit:$?"
+
+say install
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold __PACKAGES__ 2>&1 | tail -10
+echo "exit:$?"
+
+say docker
+systemctl enable --now docker >/dev/null 2>&1
+printf 'service:%s\n' "$(systemctl is-active docker 2>/dev/null || echo inactive)"
+docker --version 2>/dev/null || echo "docker: absent"
+
+say gids
+printf 'video=%s\nrender=%s\n' "$(getent group video | cut -d: -f3)" "$(getent group render | cut -d: -f3)"
+
+say rocm
+command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showproductname --json 2>/dev/null | head -c 300 || echo "-"
+echo
+command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -cE '^\s*Name:\s*gfx[0-9a-f]+$' || echo "-"
+
+say disk
+df -h --output=avail /var/lib/docker 2>/dev/null | tail -1 || df -h --output=avail / | tail -1
+"""
+
+# The pull is detached on purpose. The ROCm vLLM images are 35-62 GB and a
+# foreground `docker pull` outlives any sane MCP call timeout, which would leave
+# the client believing a pull that is running fine has failed. setsid + nohup
+# with stdin closed also stops ssh waiting on the child's stdout, which is what
+# makes a backgrounded remote command hang until the timeout anyway.
+_PULL_START_SCRIPT = r"""
+IMAGE='__IMAGE__'
+LOG='__LOG__'
+command -v docker >/dev/null 2>&1 || { echo "NO_DOCKER"; exit 0; }
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then echo "ALREADY_PRESENT"; exit 0; fi
+pgrep -f "docker pull $IMAGE" >/dev/null 2>&1 && { echo "ALREADY_RUNNING"; exit 0; }
+: > "$LOG"
+setsid nohup docker pull "$IMAGE" </dev/null >>"$LOG" 2>&1 &
+echo "STARTED pid=$!"
+"""
+
+_PULL_STATUS_SCRIPT = r"""
+say() { printf '<<<%s>>>\n' "$1"; }
+IMAGE='__IMAGE__'
+LOG='__LOG__'
+
+say image
+docker image inspect --format '{{.Id}} {{.Size}}' "$IMAGE" 2>/dev/null || echo absent
+
+say running
+pgrep -f "docker pull $IMAGE" >/dev/null 2>&1 && echo yes || echo no
+
+say log
+tail -4 "$LOG" 2>/dev/null | tr '\r' '\n' | tail -4 || echo "(no log)"
+"""
+
+# CLAUDE.md's pre-pull check, run after the fact here because the image is
+# already down. `import vllm.config` comes first or a circular import makes a
+# good image look broken, and /dev/kfd plus /dev/dri have to be mapped in or
+# get_arch_list() returns [] and looks like a build with no kernels for you.
+# The convertor registry's module has moved between vLLM versions, so it is
+# searched for rather than imported from a path that may not exist.
+_GEMMA4_PROBE = r"""
+import json
+
+out = {}
+try:
+    import vllm.config  # noqa: F401  circular-import guard, see CLAUDE.md
+    import vllm
+
+    out["vllm"] = vllm.__version__
+except Exception as exc:
+    out["vllm_error"] = f"{type(exc).__name__}: {exc}"
+
+convertor = "not found"
+for name in (
+    "vllm.transformers_utils.config",
+    "vllm.config",
+    "vllm.transformers_utils.configs",
+    "vllm.model_executor.models.registry",
+):
+    try:
+        mod = __import__(name, fromlist=["MODEL_ARCH_CONFIG_CONVERTORS"])
+    except Exception:
+        continue
+    registry = getattr(mod, "MODEL_ARCH_CONFIG_CONVERTORS", None)
+    if registry is not None:
+        convertor = f"{name}: {registry.get('gemma4')!r}"
+        break
+out["gemma4_convertor"] = convertor
+
+try:
+    import torch
+
+    out["torch"] = torch.__version__
+    out["arch_list"] = torch.cuda.get_arch_list()
+except Exception as exc:
+    out["torch_error"] = f"{type(exc).__name__}: {exc}"
+
+try:
+    import transformers
+
+    out["transformers"] = transformers.__version__
+except Exception as exc:
+    out["transformers_error"] = f"{type(exc).__name__}: {exc}"
+
+print(json.dumps(out, indent=2))
+"""
 
 
 @mcp.tool(title="List managed droplets", annotations=READ_ONLY)
@@ -850,7 +1002,13 @@ async def gpu_status(droplet: str) -> str:
                 "MI300X VF during provisioning and unloads itself."
             )
         elif "kfd:present" in probe:
-            diagnosis = "`/dev/kfd` exists, so the driver is up and the fault is in the tooling or its permissions."
+            diagnosis = (
+                "`/dev/kfd` exists, but that is weaker evidence than it looks: the node is created "
+                "before `amdgpu` finishes probing, so it survives a bind that failed. Run "
+                "`hardware_scan` — if it reports the card on the PCI bus with no gfx agent, the driver "
+                "did not bind and `reboot_droplet` is the fix. Otherwise the fault is in the tooling "
+                "or its permissions."
+            )
         else:
             diagnosis = (
                 "The `/dev/kfd` probe returned neither answer, so the state of the driver is unknown — "
@@ -997,6 +1155,19 @@ async def hardware_scan(droplet: str) -> str:
         marketing = [ln.split(":", 1)[1].strip() for ln in agents if "Marketing Name" in ln and "CPU" not in ln]
         if gfx:
             lines.append(f"- gfx targets: {', '.join(f'`{g}`' for g in gfx)}  ({len(gfx)} GPU agent(s))")
+        elif any("Processing accelerator" in ln or "Instinct" in ln for ln in block("pci")):
+            # The card is on the PCI bus and ROCm sees no GPU agent, which is
+            # the bind failure and not a missing device. /dev/kfd is NOT the
+            # test for this: it and /dev/dri/renderD128 are created before the
+            # probe fails, so both can be present on a card nothing can use.
+            # Measured 2026-09-17 on 601418522 — `amdgpu` was in lsmod, /dev/kfd
+            # existed, rocminfo listed only the CPU, and dmesg showed
+            # "Doesn't get msg:1 from pf, error=-62" inside amdgpu_pci_probe.
+            lines.append(
+                "- **gfx targets: none — the card is on the PCI bus and `amdgpu` did not bind to it.**"
+                "  `reboot_droplet` is the fix; nothing needs installing. Neither `/dev/kfd` above nor"
+                " `amdgpu` in `lsmod` contradicts this."
+            )
         for name in marketing:
             if "AMD" in name or "Instinct" in name or "Radeon" in name:
                 lines.append(f"- device: {name}")
@@ -1029,6 +1200,205 @@ async def hardware_scan(droplet: str) -> str:
         return "\n".join(lines)
     except Exception as exc:
         return _error(exc)
+
+
+@mcp.tool(title="Prepare a droplet for serving", annotations=WRITE)
+async def prepare_droplet(droplet: str, pull_image: bool = True, image: Optional[str] = None) -> str:
+    """Bring a bare droplet up to the point where vLLM can be served.
+
+    The stock AMD Developer Cloud image ships a working kernel and an empty
+    userspace: measured on a fresh droplet, of eleven tools probed only python3
+    existed — no rocm-smi, no rocminfo, no docker, no git, no pip3, no
+    /opt/rocm. Nothing here can serve a model until that is fixed, and
+    gpu_status reports "command not found" in the meantime.
+
+    Three steps, each reported separately and none of them fatal to the others:
+
+    1. apt sources. Every `Components:` line in the deb822 sources file is
+       rewritten to APT_COMPONENTS — contrib and non-free are not optional
+       extras on this box, because firmware lives in non-free-firmware — and
+       `-backports` is added to the release suite only if it is not there
+       already. It usually is. The file is edited in place and backed up once
+       to `.amd-gputools.bak`, because its URIs are a DigitalOcean mirror
+       indirection that a hand-written `deb` line would bypass.
+    2. SETUP_PACKAGES, which includes docker and Debian's ROCm tools, then
+       enables the docker service.
+    3. With pull_image=True, starts a DETACHED `docker pull` of VLLM_IMAGE and
+       returns immediately. The ROCm vLLM images are 35-62 GB, so a foreground
+       pull would outlive the call and look like a failure. Poll it with
+       `vllm_image_status`.
+
+    Safe to run twice: the sources rewrite is idempotent, apt-get install is a
+    no-op on packages already present, and the pull declines if the image is
+    already there or already being fetched.
+    """
+    try:
+        item = await _resolve(droplet)
+        ip, why_not = await _reachable(item)
+        if why_not:
+            return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
+
+        script = _PREPARE_SCRIPT.replace("__COMPONENTS__", APT_COMPONENTS).replace("__PACKAGES__", SETUP_PACKAGES)
+        code, out, err = await run_command(_ssh_argv(ip, script), timeout=900)
+        transport = _ssh_transport_error(code, err)
+        if transport:
+            return f"❌ Cannot reach `{item.get('name')}` over SSH at {ip}.\n\n```\n{transport}\n```"
+        sec = _sections(out)
+        if not sec:
+            return f"❌ Setup returned nothing from `{item.get('name')}` (exit {code}).\n\n```\n{err[:600]}\n```"
+
+        lines = [f"# Prepared `{item.get('name')}`", ""]
+
+        before = sec.get("before", [])
+        after = sec.get("sources", [])
+        lines += ["## apt sources", ""]
+        lines.append(f"```\nbefore: {' | '.join(before) or '(none)'}\nafter:  {' | '.join(after) or '(none)'}\n```")
+        # Saying which of the two things actually changed matters, because the
+        # obvious assumption — that backports needed enabling — was wrong here.
+        joined_before, joined_after = " ".join(before), " ".join(after)
+        changed = []
+        if "contrib" not in joined_before and "contrib" in joined_after:
+            changed.append("components")
+        if "-backports" not in joined_before and "-backports" in joined_after:
+            changed.append("backports suite")
+        if "-backports" in joined_before:
+            lines.append("")
+            lines.append("📡 backports was **already enabled**; only the components were short.")
+        lines.append("")
+        lines.append(f"Changed: {', '.join(changed) or 'nothing — already configured'}.")
+
+        lines += ["", "## apt", ""]
+        for name in ("update", "install"):
+            body = "\n".join(sec.get(name, [])) or "(no output)"
+            lines.append(f"**{name}**\n\n```\n{body[:1200]}\n```")
+
+        lines += ["", "## docker", ""]
+        for line in sec.get("docker", []):
+            lines.append(f"- {line.strip()}")
+        gids = {}
+        for line in sec.get("gids", []):
+            if "=" in line:
+                key, _, value = line.strip().partition("=")
+                gids[key] = value
+        if gids:
+            # --group-add render fails outright on the container images: they
+            # have no render group of their own. The numeric GIDs are resolved
+            # here so vllm/docker-serve.sh never has to guess. See CLAUDE.md.
+            lines.append(f"- GPU group GIDs on this host: {', '.join(f'`{k}:{v}`' for k, v in gids.items())}")
+
+        rocm = [ln for ln in sec.get("rocm", []) if ln.strip() and ln.strip() != "-"]
+        lines += ["", "## ROCm userspace", ""]
+        lines.append(f"```\n{chr(10).join(rocm)[:600] if rocm else '(rocm-smi still reports nothing)'}\n```")
+
+        for line in sec.get("disk", []):
+            lines.append(f"- disk free for images: {line.strip()}")
+
+        wanted = (image or VLLM_IMAGE).strip()
+        lines += ["", "## vLLM image", ""]
+        if not pull_image:
+            lines.append(f"Not pulled (pull_image=false). `{wanted}` when you want it.")
+        else:
+            started = await _start_pull(ip, wanted)
+            lines.append(started)
+        return "\n".join(lines)
+    except Exception as exc:
+        return _error(exc)
+
+
+async def _start_pull(ip: str, image: str) -> str:
+    """Kick off the detached pull and say what the droplet made of the request."""
+    script = _PULL_START_SCRIPT.replace("__IMAGE__", image).replace("__LOG__", PULL_LOG)
+    _, out, _ = await run_command(_ssh_argv(ip, script), timeout=120)
+    answer = (out or "").strip()
+    if "NO_DOCKER" in answer:
+        return "❌ docker is not installed, so nothing was pulled. The install step above is why."
+    if "ALREADY_PRESENT" in answer:
+        return f"✅ `{image}` is already on the droplet. Nothing to pull."
+    if "ALREADY_RUNNING" in answer:
+        return f"📡 A pull of `{image}` is already running. Poll `vllm_image_status`."
+    return (
+        f"📡 Started a detached pull of `{image}` ({answer}).\n\n"
+        f"These images are 35-62 GB, so this runs for minutes with nothing to see. "
+        f"Poll `vllm_image_status`; the log is at `{PULL_LOG}` on the droplet."
+    )
+
+
+@mcp.tool(title="Check the vLLM image pull", annotations=READ_ONLY)
+async def vllm_image_status(droplet: str, image: Optional[str] = None, probe: bool = False) -> str:
+    """Report whether the vLLM image is down yet, and optionally test it for Gemma 4.
+
+    probe=True runs the image's own python3 against /dev/kfd and prints the
+    vLLM, torch and transformers versions, the gfx targets the build actually
+    carries, and whether the Gemma 4 config convertor is present. That last one
+    is the check worth doing before a serving attempt rather than after: an
+    image missing `Gemma4ModelArchConfigConvertor` fails on `head_dim` while
+    parsing config, long before the GPU is touched, and the error names neither
+    Gemma nor the image.
+    """
+    try:
+        item = await _resolve(droplet)
+        ip, why_not = await _reachable(item)
+        if why_not:
+            return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
+        wanted = (image or VLLM_IMAGE).strip()
+
+        script = _PULL_STATUS_SCRIPT.replace("__IMAGE__", wanted).replace("__LOG__", PULL_LOG)
+        code, out, err = await run_command(_ssh_argv(ip, script), timeout=120)
+        transport = _ssh_transport_error(code, err)
+        if transport:
+            return f"❌ Cannot reach `{item.get('name')}` over SSH at {ip}.\n\n```\n{transport}\n```"
+        sec = _sections(out)
+        present = sec.get("image", ["absent"])[0].strip()
+        running = (sec.get("running", ["no"])[0]).strip() == "yes"
+        log = "\n".join(sec.get("log", [])) or "(no log yet)"
+
+        if present == "absent":
+            icon = "📡" if running else "❌"
+            state = "still pulling" if running else "not present and no pull is running"
+            return f"{icon} `{wanted}` is {state} on `{item.get('name')}`.\n\n```\n{log[:800]}\n```" + (
+                "" if running else f"\n\nStart one with `prepare_droplet` or check `{PULL_LOG}`."
+            )
+
+        # `docker image inspect` prints the size in bytes; convert it here
+        # rather than handing a reader eleven digits to parse.
+        parts = present.split()
+        size = ""
+        if len(parts) > 1 and parts[1].isdigit():
+            size = f", {int(parts[1]) / 1_000_000_000:.1f} GB on disk"
+        head = f"✅ `{wanted}` is present on `{item.get('name')}`{size}."
+        if not probe:
+            return f"{head}\n\nRun again with probe=true to check it for Gemma 4 support."
+        return f"{head}\n\n{await _probe_image(ip, wanted)}"
+    except Exception as exc:
+        return _error(exc)
+
+
+async def _probe_image(ip: str, image: str) -> str:
+    """Run CLAUDE.md's Gemma 4 capability check inside the image."""
+    # The probe is written to a file and mounted rather than passed as -c, so
+    # nothing has to survive two levels of shell quoting. The GIDs are resolved
+    # on the host: --group-add render fails outright against these images,
+    # which have no render group of their own.
+    runner = (
+        "cat > /tmp/gemma4_probe.py <<'PROBE'\n"
+        + _GEMMA4_PROBE
+        + "PROBE\n"
+        + "VID=$(getent group video | cut -d: -f3); REN=$(getent group render | cut -d: -f3)\n"
+        + "docker run --rm -v /tmp/gemma4_probe.py:/probe.py --device /dev/kfd --device /dev/dri "
+        + f'--group-add "$VID" --group-add "$REN" --entrypoint python3 {image} /probe.py 2>&1 | tail -40\n'
+    )
+    _, out, err = await run_command(_ssh_argv(ip, runner), timeout=600)
+    body = (out or err or "(no output)").strip()
+    verdict = ""
+    if "gemma4_convertor" in body:
+        missing = '"gemma4_convertor": "not found"' in body or "None" in body.split("gemma4_convertor")[1][:40]
+        verdict = (
+            "\n\n❌ **No Gemma 4 convertor in this build.** It will raise on `head_dim` while parsing "
+            "config, before the GPU is touched. A different image is needed, not a different flag."
+            if missing
+            else "\n\n✅ **Gemma 4 convertor present.**"
+        )
+    return f"```json\n{body[:3000]}\n```{verdict}"
 
 
 @mcp.tool(title="List GPU droplet sizes", annotations=READ_ONLY)

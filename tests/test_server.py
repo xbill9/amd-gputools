@@ -218,12 +218,42 @@ class ToolErrorTests(unittest.IsolatedAsyncioTestCase):
             result = await server.list_droplets()
         self.assertTrue(result.startswith("❌"), result)
 
-    async def test_every_tool_catches(self):
-        source = (PROJECT_DIR / "server.py").read_text()
-        decorated = source.count("@mcp.tool(")
-        caught = source.count("except Exception as exc:")
+    def test_every_tool_catches(self):
+        """Each @mcp.tool body must contain `except Exception`, checked by parsing.
+
+        This counted the two substrings and compared the totals until the
+        remote Gemma 4 probe — Python source embedded in a string constant —
+        contributed three `except Exception as exc:` of its own and the count
+        passed while meaning nothing. Substring matching on source finds things
+        that are not there; the tree does not have that problem.
+        """
+        import ast
+
+        tree = ast.parse((PROJECT_DIR / "server.py").read_text())
+
+        def is_tool(node):
+            return any(
+                isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Attribute)
+                and d.func.attr == "tool"
+                and isinstance(d.func.value, ast.Name)
+                and d.func.value.id == "mcp"
+                for d in node.decorator_list
+            )
+
+        def catches(node):
+            return any(
+                isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Try)
+                for handler in inner.handlers
+            )
+
+        tools = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
+        self.assertGreater(len(tools), 10, "the tools were not found; the decorator shape changed")
+        unguarded = sorted(n.name for n in tools if not catches(n))
         # get_help has no external call and needs no handler; everything else does.
-        self.assertEqual(caught, decorated - 1, "a tool is missing its `except Exception` guard")
+        self.assertEqual(unguarded, ["get_help"], "a tool is missing its `except Exception` guard")
 
 
 class StopDropletTests(unittest.IsolatedAsyncioTestCase):
@@ -335,9 +365,18 @@ class GPUStatusExitCodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/dev/kfd", result)
         self.assertIn("ROCm compute is unavailable", result)
 
-    async def test_present_kfd_points_at_the_tooling_instead(self):
+    async def test_present_kfd_does_not_clear_the_driver(self):
+        """/dev/kfd surviving a failed bind is the whole point of this wording.
+
+        It used to assert "driver is up". Measured 2026-09-17 on 601418522:
+        /dev/kfd existed, amdgpu was in lsmod, and rocminfo listed only the
+        CPU because the probe had died inside amdgpu_pci_probe. The node is
+        created before that happens, so it proves nothing.
+        """
         result, _ = await self._run([(0, "", "something odd"), (0, "ERROR: no devices", ""), (0, "kfd:present\n", "")])
-        self.assertIn("driver is up", result)
+        self.assertIn("weaker evidence", result)
+        self.assertIn("hardware_scan", result)
+        self.assertNotIn("the driver is up and", result)
 
     async def test_healthy_json_still_reports_success(self):
         raw = '{"card0": {"Card Series": "MI300X", "GPU use (%)": "0", "GPU Memory Use (%)": "1"}}'
@@ -642,6 +681,167 @@ class ScanPackageFilterTests(unittest.IsolatedAsyncioTestCase):
         source = (PROJECT_DIR / "server.py").read_text()
         self.assertIn("$2 ~ /amdgpu|rocm", source, "the package filter must match the name field")
         self.assertNotIn("awk '/amdgpu|rocm|hsa|hip/", source, "a bare `hip` substring matches whiptail")
+
+
+class BindFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A card on the PCI bus with no gfx agent did not bind. Say so, don't omit it."""
+
+    NO_AGENTS = (
+        "<<<host>>>\nbox\n6.12\nDebian 13\nup 3 minutes\nXeon\n20\n236 GB\n679G\n"
+        "<<<kfd>>>\npresent\nloaded\n-\n"
+        "<<<pci>>>\n83:00.0 Processing accelerators [1200]: Advanced Micro Devices, Inc. Instinct MI300X VF\n"
+        "<<<agents>>>\n  Name:   INTEL XEON\n  Marketing Name:  INTEL XEON\n"
+        "<<<vram>>>\n-\n<<<firmware>>>\n-\n<<<tools>>>\nrocm-smi\t/usr/bin/rocm-smi\n"
+        "<<<versions>>>\nPython 3.13.5\n<<<packages>>>\n<<<python>>>\n-\n"
+    )
+
+    async def _scan(self, raw):
+        async def fake_run_command(cmd, timeout=120):
+            return (0, raw, "")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.hardware_scan("mi300-1")
+
+    async def test_card_present_with_no_agent_is_named_a_bind_failure(self):
+        result = await self._scan(self.NO_AGENTS)
+        self.assertIn("did not bind", result)
+        self.assertIn("reboot_droplet", result)
+
+    async def test_kfd_present_does_not_suppress_the_warning(self):
+        """The whole trap: /dev/kfd says present on a card that never bound."""
+        result = await self._scan(self.NO_AGENTS)
+        self.assertIn("`/dev/kfd`: **present**", result)
+        self.assertIn("did not bind", result)
+
+    async def test_a_working_card_is_not_accused_of_not_binding(self):
+        result = await self._scan(HardwareScanTests.SCAN)
+        self.assertNotIn("did not bind", result)
+        self.assertIn("1 GPU agent(s)", result)
+
+    async def test_no_card_on_the_bus_is_not_a_bind_failure_either(self):
+        no_card = self.NO_AGENTS.replace(
+            "83:00.0 Processing accelerators [1200]: Advanced Micro Devices, Inc. Instinct MI300X VF",
+            "00:01.0 VGA compatible controller [0300]: Red Hat, Inc. Virtio 1.0 GPU",
+        )
+        result = await self._scan(no_card)
+        self.assertNotIn("did not bind", result)
+
+
+class PrepareDropletTests(unittest.IsolatedAsyncioTestCase):
+    """The sources file is deb822 behind a mirror indirection; edit, never append."""
+
+    PREPARED = (
+        "<<<before>>>\nSuites: trixie trixie-updates trixie-backports\nComponents: main\n"
+        "<<<sources>>>\nSuites: trixie trixie-updates trixie-backports\n"
+        "Components: main contrib non-free non-free-firmware\n"
+        "<<<update>>>\nexit:0\n"
+        "<<<install>>>\nSetting up rocminfo (6.1.2-2) ...\nexit:0\n"
+        "<<<docker>>>\nservice:active\nDocker version 26.1.5+dfsg1, build a72d7cd\n"
+        "<<<gids>>>\nvideo=44\nrender=991\n"
+        "<<<rocm>>>\n1\n"
+        "<<<disk>>>\n678G\n"
+    )
+
+    async def _prepare(self, raw=None, pull="STARTED pid=7088", **kwargs):
+        calls = []
+
+        async def fake_run_command(cmd, timeout=120):
+            calls.append(cmd[-1])
+            if "docker pull" in cmd[-1]:
+                return (0, pull, "")
+            return (0, self.PREPARED if raw is None else raw, "")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.prepare_droplet("mi300-1", **kwargs), calls
+
+    async def test_it_reports_that_backports_was_already_on(self):
+        """The obvious assumption — that backports needed enabling — was wrong."""
+        result, _ = await self._prepare()
+        self.assertIn("already enabled", result)
+        self.assertIn("Changed: components", result)
+
+    async def test_the_remote_script_edits_in_place_and_never_appends(self):
+        """A hand-written `deb` line would bypass the DigitalOcean mirror.
+
+        Asserted against the script constant, not the file: server.py's comment
+        quotes the very line it warns against, so scanning the whole source
+        fails on its own documentation.
+        """
+        script = server._PREPARE_SCRIPT
+        self.assertIn("sed -i", script)
+        self.assertNotIn(">> /etc/apt/sources.list", script)
+        self.assertNotIn("deb http://deb.debian.org", script)
+        self.assertNotIn("tee /etc/apt/sources.list", script)
+
+    async def test_it_backs_the_sources_file_up_once(self):
+        source = (PROJECT_DIR / "server.py").read_text()
+        self.assertIn(".amd-gputools.bak", source)
+
+    async def test_gpu_gids_are_reported_for_the_container_flags(self):
+        result, _ = await self._prepare()
+        self.assertIn("`video:44`", result)
+        self.assertIn("`render:991`", result)
+
+    async def test_the_pull_is_detached(self):
+        """A foreground pull of a 35-62 GB image outlives any call timeout."""
+        source = (PROJECT_DIR / "server.py").read_text()
+        self.assertIn("setsid nohup docker pull", source)
+        self.assertIn("</dev/null", source)
+
+    async def test_pull_image_false_skips_the_pull(self):
+        result, calls = await self._prepare(pull_image=False)
+        self.assertNotIn("docker pull", " ".join(calls))
+        self.assertIn("Not pulled", result)
+
+    async def test_an_already_present_image_is_not_repulled(self):
+        result, _ = await self._prepare(pull="ALREADY_PRESENT")
+        self.assertIn("already on the droplet", result)
+
+    async def test_a_running_pull_is_not_duplicated(self):
+        result, _ = await self._prepare(pull="ALREADY_RUNNING")
+        self.assertIn("already running", result)
+
+    async def test_missing_docker_is_reported_not_ignored(self):
+        result, _ = await self._prepare(pull="NO_DOCKER")
+        self.assertIn("docker is not installed", result)
+
+    async def test_an_unreachable_droplet_does_not_produce_a_setup_report(self):
+        async def fake_run_command(cmd, timeout=120):
+            return (255, "", "ssh: connect to host 203.0.113.7 port 22: Connection refused")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                result = await server.prepare_droplet("mi300-1")
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertIn("Connection refused", result)
+
+
+class VLLMImageStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def _status(self, image_line, running="no", **kwargs):
+        raw = f"<<<image>>>\n{image_line}\n<<<running>>>\n{running}\n<<<log>>>\nef4cb6142c43: Download complete\n"
+
+        async def fake_run_command(cmd, timeout=120):
+            return (0, raw, "")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.vllm_image_status("mi300-1", **kwargs)
+
+    async def test_absent_and_pulling_is_progress_not_failure(self):
+        result = await self._status("absent", running="yes")
+        self.assertTrue(result.startswith("📡"), result)
+        self.assertIn("still pulling", result)
+
+    async def test_absent_and_idle_is_a_failure(self):
+        result = await self._status("absent", running="no")
+        self.assertTrue(result.startswith("❌"), result)
+
+    async def test_size_is_converted_here_not_left_in_bytes(self):
+        result = await self._status("sha256:abc123 62000000000")
+        self.assertIn("62.0 GB", result)
+        self.assertNotIn("62000000000", result)
 
 
 class RegistrationTests(unittest.TestCase):
