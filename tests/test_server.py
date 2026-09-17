@@ -401,6 +401,178 @@ class HardwareScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.startswith("❌"), result)
 
 
+class CostLineTests(unittest.TestCase):
+    """The hourly-to-monthly multiplication happens in code, not in the reader."""
+
+    def test_hourly_is_converted(self):
+        line = server._cost_line(1.99)
+        self.assertIn("$1.990/hour", line)
+        self.assertIn("$48/day", line)
+        self.assertIn("$1,433", line)
+
+
+class SSHKeyResolutionTests(unittest.IsolatedAsyncioTestCase):
+    """A droplet created with no key costs money and cannot be reached."""
+
+    KEYS = [
+        {"id": 59210687, "name": "amd", "fingerprint": "92:17:77:ae"},
+        {"id": 11111111, "name": "laptop", "fingerprint": "aa:bb:cc:dd"},
+    ]
+
+    def _keys(self, keys=None):
+        return patch.object(server, "_paged", AsyncMock(return_value=self.KEYS if keys is None else keys))
+
+    async def test_by_name_id_and_fingerprint(self):
+        with self._keys():
+            for wanted in ("amd", "59210687", "92:17:77:ae"):
+                ids, _ = await server._resolve_ssh_keys(wanted)
+                self.assertEqual(ids, [59210687], wanted)
+
+    async def test_naming_nothing_means_every_key_not_none(self):
+        """An empty setting must not silently produce a password-only droplet."""
+        with self._keys():
+            ids, labels = await server._resolve_ssh_keys("")
+            self.assertEqual(ids, [59210687, 11111111])
+            self.assertEqual(len(labels), 2)
+
+    async def test_unknown_key_names_what_is_available(self):
+        with self._keys():
+            with self.assertRaises(RuntimeError) as ctx:
+                await server._resolve_ssh_keys("typo")
+        self.assertIn("`amd`", str(ctx.exception))
+
+    async def test_account_with_no_keys_is_refused(self):
+        with self._keys([]):
+            with self.assertRaises(RuntimeError) as ctx:
+                await server._resolve_ssh_keys("")
+        self.assertIn("root password by email", str(ctx.exception))
+
+
+class CreateDropletTests(unittest.IsolatedAsyncioTestCase):
+    """Creating starts a meter that powering off does not stop, so it is two-step."""
+
+    SIZES = [
+        {"slug": "gpu-mi300x1-192gb", "price_hourly": 2.59, "price_monthly": 1891.0, "regions": ["tor1"]},
+        {"slug": "gpu-mi325x1-256gb", "price_hourly": 3.8, "price_monthly": 2774.0, "regions": ["nyc2"]},
+    ]
+    REGIONS = [{"slug": "atl1", "available": True, "sizes": ["gpu-mi325x1-256gb", "s-1vcpu-1gb"]}]
+    KEYS = [{"id": 59210687, "name": "amd", "fingerprint": "92:17:77:ae"}]
+
+    def _api_fixtures(self, droplets=(), posts=None):
+        """Patch the three list endpoints and record every POST."""
+
+        async def fake_paged(path, key):
+            if path.startswith("/sizes"):
+                return list(self.SIZES)
+            if path.startswith("/regions"):
+                return list(self.REGIONS)
+            if path.startswith("/account/keys"):
+                return list(self.KEYS)
+            raise AssertionError(f"unexpected list endpoint: {path}")
+
+        async def fake_api(method, path, payload=None, timeout=30):
+            posts.append((method, path, payload))
+            return {"droplet": {"id": 601142019, "name": payload["name"], "status": "new"}}
+
+        return (
+            patch.object(server, "_paged", fake_paged),
+            patch.object(server, "_droplets", AsyncMock(return_value=list(droplets))),
+            patch.object(server, "_api", fake_api),
+        )
+
+    async def _create(self, droplets=(), **kwargs):
+        posts: list = []
+        paged, drops, api = self._api_fixtures(droplets, posts)
+        with paged, drops, api:
+            result = await server.create_droplet(**kwargs)
+        return result, posts
+
+    async def test_preflight_orders_nothing(self):
+        """The default call must not reach POST /droplets at all."""
+        result, posts = await self._create(name="mi300-new")
+        self.assertEqual(posts, [], "the preflight placed an order")
+        self.assertIn("nothing has been ordered", result.lower())
+        self.assertIn("confirm=true", result)
+
+    async def test_preflight_prices_a_listed_size(self):
+        result, _ = await self._create(name="mi300-new", size="gpu-mi300x1-192gb")
+        self.assertIn("$2.590/hour", result)
+        self.assertIn("/day", result)
+
+    async def test_unlisted_devcloud_slug_is_reported_not_refused(self):
+        """gpu-mi300x1-192gb-devcloud is absent from GET /v2/sizes on purpose."""
+        result, posts = await self._create(name="mi300-new", confirm=True)
+        self.assertIn("not in `GET /v2/sizes`", result)
+        self.assertTrue(result.startswith("✅"), result)
+        self.assertEqual(len(posts), 1)
+
+    async def test_confirm_posts_and_forces_the_tag(self):
+        result, posts = await self._create(name="mi300-new", confirm=True)
+        method, path, payload = posts[0]
+        self.assertEqual((method, path), ("POST", "/droplets"))
+        self.assertEqual(payload["tags"], [server.DROPLET_TAG])
+        self.assertEqual(payload["ssh_keys"], [59210687])
+        self.assertEqual(payload["size"], server.DROPLET_SIZE)
+        self.assertIn("601142019", result)
+
+    async def test_created_droplet_is_told_to_reboot_once(self):
+        """A fresh MI300 droplet has no /dev/kfd until it is rebooted."""
+        result, _ = await self._create(name="mi300-new", confirm=True)
+        self.assertIn("/dev/kfd", result)
+        self.assertIn("reboot_droplet", result)
+
+    async def test_an_existing_tagged_droplet_blocks_a_second(self):
+        result, posts = await self._create(droplets=[ACTIVE], name="mi300-new", confirm=True)
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertEqual(posts, [], "a second droplet was ordered while one already exists")
+        self.assertIn("allow_duplicate", result)
+
+    async def test_allow_duplicate_is_the_way_past_it(self):
+        result, posts = await self._create(droplets=[ACTIVE], name="mi300-new", confirm=True, allow_duplicate=True)
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(result.startswith("✅"), result)
+
+    async def test_reusing_an_existing_name_is_refused(self):
+        result, posts = await self._create(droplets=[ACTIVE], name="mi300-1", confirm=True, allow_duplicate=True)
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertEqual(posts, [])
+        self.assertIn("start_droplet", result)
+
+    async def test_unusable_names_are_rejected_before_the_api_sees_them(self):
+        for bad in ("my droplet", "-leading", "trailing-", "under_score", ""):
+            result, posts = await self._create(name=bad, confirm=True)
+            self.assertTrue(result.startswith("❌"), f"{bad!r} was accepted")
+            self.assertEqual(posts, [], f"{bad!r} reached the API")
+
+    async def test_region_not_offering_the_size_is_flagged(self):
+        result, _ = await self._create(name="mi300-new", size="gpu-mi300x1-192gb", region="atl1")
+        self.assertIn("⚠️", result)
+        self.assertIn("tor1", result)
+
+    async def test_api_refusal_is_returned_not_raised(self):
+        async def boom(method, path, payload=None, timeout=30):
+            raise RuntimeError("DigitalOcean 422: size is not available in this region")
+
+        paged, drops, _ = self._api_fixtures([], [])
+        with paged, drops, patch.object(server, "_api", boom):
+            result = await server.create_droplet("mi300-new", confirm=True)
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertIn("422", result)
+
+
+class NoDestroyToolTests(unittest.TestCase):
+    """Create was added deliberately; destroy stays out, also deliberately."""
+
+    def test_nothing_deletes_a_droplet(self):
+        source = (PROJECT_DIR / "server.py").read_text()
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith('"'):
+                continue
+            self.assertNotIn('_api("DELETE"', stripped, f"a destroy path appeared in server.py: {stripped[:120]}")
+            self.assertNotIn('"destroy"', stripped, f"a destroy action appeared in server.py: {stripped[:120]}")
+
+
 class RegistrationTests(unittest.TestCase):
     """The server key prefixes every tool name, so the four places must agree."""
 

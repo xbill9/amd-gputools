@@ -17,24 +17,55 @@ DigitalOcean GPU droplet.
   `run_on_droplet`, `ssh_command`) or through explicit `ssh`.
 - **Powering a droplet off does not stop DigitalOcean billing it** — the resources
   stay reserved and the hourly rate keeps running. Only destroying it stops the
-  meter, and this repo deliberately has no tool that destroys one.
+  meter, and this repo deliberately has no tool that destroys one. `create_droplet`
+  exists and starts that meter, which is why it orders nothing until a second call
+  passes `confirm=true`.
 
 ## The droplet
 
-One droplet, reached through AMD Developer Cloud (`devcloud.amd.com`), which is
-DigitalOcean underneath — same v2 API, same droplet ids. The token comes from the
-**My AMD Team** account, not a personal DigitalOcean one.
+Reached through AMD Developer Cloud (`devcloud.amd.com`), which is DigitalOcean
+underneath — same v2 API, same droplet ids. The token comes from the **My AMD Team**
+account, not a personal DigitalOcean one.
+
+**There is no droplet right now.** Checked 2026-09-17: `GET /v2/droplets` returned 0
+for this account, and `GET /v2/droplets/601142018` — the box every measurement below
+was taken on — returned 404. It was destroyed, not powered off, so the meter is
+stopped. Every tool here is tag-scoped, so they all answer "no droplets tagged
+`gemma`" until a replacement exists and carries that tag.
+
+The shape to rebuild, and what the numbers below were measured on:
 
 | | |
 | --- | --- |
-| name | `debian-gpu-mi300x1-192gb-devcloud-atl1` |
-| id | `601142018` |
+| name | `debian-gpu-mi300x1-192gb-devcloud-atl1` (id `601142018`, **gone**) |
 | tag | **`gemma`** — this is what `DROPLET_TAG` must be, not `amd-gputools` |
 | size | `gpu-mi300x1-192gb-devcloud` — 1× MI300X, 192 GiB VRAM, 20 vCPU, 240 GB RAM |
-| cost | **$1.99/hour**, running now |
+| region | `atl1` |
+| cost | **$1.99/hour** — $48/day, $1,433 for 30 days |
 | OS | Debian 13 (trixie), kernel 6.12.94+deb13-amd64 |
 
-Verified 2026-09-16. Re-read the address rather than trusting this table — it changes.
+Those are the defaults `create_droplet` uses, and they live in `amd.env`
+(`DROPLET_SIZE`, `DROPLET_REGION`, `DROPLET_IMAGE`, `DROPLET_SSH_KEYS`). Verified
+2026-09-16. Re-read the id and the address rather than trusting this table — a
+rebuilt droplet gets new ones.
+
+### Creating one
+
+`create_droplet` is two-step on purpose: the first call orders **nothing** and reports
+the size, region, image and keys it would use, what the catalogue charges per hour and
+per month, and whether the API even offers that size in that region. Call it again with
+`confirm=true` to place the order. It applies `DROPLET_TAG` unconditionally — an
+untagged droplet would be a machine this server pays for and cannot reach — and it
+refuses by default if anything is already tagged, because a second GPU droplet doubles
+the hourly bill.
+
+**The API may not be able to sell you this card.** The devcloud slug is not in
+`GET /v2/sizes`, and `atl1` is not one of the regions the public API offers a GPU size
+in: checked 2026-09-17, `GET /v2/regions` listed GPU sizes only in `nyc2`, `tor1`,
+`ric1` and `mem1`, and the public `gpu-mi300x1-192gb` listed no regions at all. The
+preflight says so rather than guessing. If the order is refused, create it in the
+devcloud console and tag it `gemma` there — nothing else in this repo cares which route
+it came by.
 
 ### The GPU works — but a freshly provisioned droplet needs one reboot
 
@@ -75,9 +106,9 @@ not what devcloud sells.
 
 `@digitalocean/mcp` (1.0.70 on npm, checked 2026-09-16) and the hosted endpoint at
 `https://droplets.mcp.digitalocean.com/mcp` expose 40 droplet tools across 24 service
-areas. Seven of this server's twelve have a direct equivalent there: `droplet-list`,
-`droplet-get`, `power-on-droplet`, `power-off-droplet`, `droplet-reboot`, `droplet-action`
-and `size-list`.
+areas. Eight of this server's thirteen have a direct equivalent there: `droplet-list`,
+`droplet-get`, `droplet-create`, `power-on-droplet`, `power-off-droplet`, `droplet-reboot`,
+`droplet-action` and `size-list`.
 
 **It is an API client, so it stops at the droplet object.** The repo tree has no `ssh`,
 `exec`, `console`, `command` or `remote` tooling of any kind, which leaves `ssh_command`,
@@ -88,9 +119,11 @@ droplet object. Its `size-list` reads the same `GET /v2/sizes` that omits the de
 slug, so it quotes $2.59 for a $1.99 card.
 
 Two design differences are deliberate here and should stay that way. The official server
-has `droplet-create` and `droplet-delete`; this one has neither. And a tag there is a
-selector for bulk actions (`power-off-droplets-tag`); here it is a boundary, so an
-untagged droplet is not addressable at all.
+has `droplet-delete`; this one does not, and should not. And a tag there is a selector
+for bulk actions (`power-off-droplets-tag`); here it is a boundary, so an untagged
+droplet is not addressable at all — which is also why `create_droplet` applies the tag
+itself rather than taking it as an argument, where `droplet-create` takes a free-form
+tag list and will happily build something no tool can find again.
 
 Do not reimplement the account, image, volume or fleet tools. If those are needed, add the
 official server alongside this one.

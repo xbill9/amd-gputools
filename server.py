@@ -23,12 +23,15 @@ appear in GET /v2/sizes: that endpoint lists the public gpu-mi300x1-192gb at
 $2.59/hr instead, so list_gpu_sizes shows the public catalogue, not what
 devcloud actually sells.
 
-Deliberately absent: create and destroy. This server can find, start, stop,
-reach and interrogate droplets that already exist, and it is scoped by tag so
-it cannot act on a droplet it was not pointed at. Provisioning an MI300 droplet
-and destroying one are the two operations whose cost of being wrong is measured
-in dollars per hour and in lost local state, so they stay a deliberate human
-step in the DigitalOcean console or a future tool added on purpose.
+Deliberately absent: destroy. This server can create, find, start, stop, reach
+and interrogate droplets, and every lookup is scoped by tag so it cannot act on
+a droplet it was not pointed at. create_droplet is two-step on purpose — the
+first call orders nothing and reports what it would order, what the catalogue
+says that costs and whether the API even offers that size in that region — and
+it applies the tag unconditionally, because an untagged droplet would be a
+machine this server is paying for and cannot reach. Destroying one is the
+operation whose cost of being wrong is measured in lost local state rather than
+dollars, and it stays a deliberate human step in the DigitalOcean console.
 
 BILLING DOES NOT STOP WHEN A DROPLET IS POWERED OFF. DigitalOcean bills a
 powered-off droplet at the full hourly rate, because the resources stay
@@ -79,6 +82,21 @@ SSH_KEY = os.environ.get("SSH_KEY", "")
 SSH_PORT = os.environ.get("SSH_PORT", "22")
 REMOTE_WORKDIR = os.environ.get("REMOTE_WORKDIR", "/opt/amd-gputools")
 
+# Defaults for create_droplet: identifiers, not secrets, so they belong in
+# amd.env. They describe the droplet this project actually ran, so creating one
+# with no arguments rebuilds that box rather than inventing a new shape.
+#
+# The size slug is an AMD Developer Cloud one and is NOT in GET /v2/sizes — the
+# public catalogue lists gpu-mi300x1-192gb at $2.59/hr where devcloud sells this
+# at $1.99/hr — so "unknown slug" is the normal case here and create_droplet
+# reports it rather than refusing on it.
+DROPLET_SIZE = os.environ.get("DROPLET_SIZE", "gpu-mi300x1-192gb-devcloud")
+DROPLET_REGION = os.environ.get("DROPLET_REGION", "atl1")
+DROPLET_IMAGE = os.environ.get("DROPLET_IMAGE", "debian-13-x64")
+# Comma-separated key names, ids or fingerprints. Empty means every key on the
+# account, never none: see _resolve_ssh_keys.
+DROPLET_SSH_KEYS = os.environ.get("DROPLET_SSH_KEYS", "")
+
 # Last-resort token file, matching ssh-droplet.sh so the shell script and the
 # server never disagree about where the token lives. A module constant rather
 # than an inline path so tests can point it somewhere that does not exist.
@@ -88,6 +106,10 @@ mcp = MCPServer(MCP_SERVER_NAME)
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
 WRITE = ToolAnnotations(destructiveHint=False)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
+# Creating a droplet destroys nothing, but destructiveHint is what makes a client
+# stop and ask, and starting a $2/hour meter that only a console visit can stop
+# is exactly the class of call that should be confirmed rather than inferred.
+COSTLY = ToolAnnotations(destructiveHint=True, idempotentHint=False)
 
 
 def _error(exc: Exception) -> str:
@@ -284,6 +306,100 @@ def _fmt_price(size: dict) -> str:
     return f"${hourly:.3f}/hr (${monthly:,.0f}/mo)" if monthly else f"${hourly:.3f}/hr"
 
 
+# DigitalOcean accepts letters, digits, dots and dashes in a droplet name and
+# rejects anything else with a 422 that does not say which character offended.
+_NAME_OK = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?")
+
+
+def _cost_line(hourly: float) -> str:
+    """Spell an hourly rate out in days and months, computed here rather than quoted.
+
+    An hourly figure is the number nobody converts: $1.99/hr reads as small and
+    is $1,433 a month. The multiplication belongs in code — see CLAUDE.md.
+    """
+    return f"${hourly:.3f}/hour — ${hourly * 24:,.0f}/day, ${hourly * 24 * 30:,.0f} for 30 days if it is left up."
+
+
+async def _resolve_ssh_keys(wanted: str) -> tuple[list[int], list[str]]:
+    """Turn a comma-separated list of key names, ids or fingerprints into key ids.
+
+    Naming nothing means every key on the account, never none. A GPU droplet
+    created with no key is not a cheap mistake: DigitalOcean falls back to
+    emailing a root password, `ssh_command` and `run_on_droplet` cannot use one,
+    and the meter runs at full rate while somebody goes looking for the mail.
+    """
+    keys = await _paged("/account/keys", "ssh_keys")
+    if not keys:
+        raise RuntimeError(
+            "No SSH keys on this account. Add one in the DigitalOcean console before creating a "
+            "droplet — one created without a key gets a root password by email, which none of the "
+            "SSH tools here can use, while billing at the full hourly rate."
+        )
+    names = [part.strip() for part in wanted.split(",") if part.strip()]
+    if not names:
+        return [int(k["id"]) for k in keys], [str(k.get("name")) for k in keys]
+    chosen: list[int] = []
+    labels: list[str] = []
+    for want in names:
+        for key in keys:
+            if want in (str(key.get("id")), key.get("name"), key.get("fingerprint")):
+                chosen.append(int(key["id"]))
+                labels.append(f"`{key.get('name')}` ({key.get('fingerprint')})")
+                break
+        else:
+            have = ", ".join(f"`{k.get('name')}`" for k in keys) or "(none)"
+            raise RuntimeError(f"No SSH key `{want}` on this account. Keys on the account: {have}.")
+    return chosen, labels
+
+
+async def _create_preflight(size: str, region: str, image: str) -> tuple[list[str], Optional[float]]:
+    """Describe a size/region/image order before anything is placed, with its price.
+
+    Every finding here is one the API would otherwise deliver as a 422 after the
+    droplet request, and the size check cannot be fatal: the devcloud slug this
+    project uses is absent from the public catalogue by design, so "not listed"
+    is the normal case and is reported rather than refused.
+    """
+    notes: list[str] = []
+    hourly: Optional[float] = None
+
+    sizes = {s.get("slug"): s for s in await _paged("/sizes", "sizes")}
+    listed = sizes.get(size)
+    if listed:
+        hourly = listed.get("price_hourly")
+        notes.append(f"- size `{size}`: in the public catalogue at {_fmt_price(listed)}.")
+        offered = listed.get("regions") or []
+        if not offered:
+            notes.append("  ⚠️ it lists no regions at all, so ordering it through the API may be refused.")
+        elif region not in offered:
+            notes.append(
+                f"  ⚠️ it lists {', '.join(f'`{r}`' for r in offered)} — not `{region}`. "
+                f"Expect a 422 unless this is a devcloud allocation."
+            )
+    else:
+        notes.append(
+            f"- ⚠️ size `{size}` is not in `GET /v2/sizes`. Expected for an AMD Developer Cloud slug — "
+            f"the public catalogue carries `gpu-mi300x1-192gb` at $2.59/hr instead of the $1.99/hr "
+            f"devcloud card — but it does mean the price cannot be quoted from the API here, and the "
+            f"order may still be refused. The devcloud console is the fallback."
+        )
+
+    regions = {r.get("slug"): r for r in await _paged("/regions", "regions")}
+    here = regions.get(region)
+    if not here:
+        notes.append(f"- ⚠️ region `{region}` is not in `GET /v2/regions`.")
+    elif not here.get("available"):
+        notes.append(f"- ⚠️ region `{region}` reports `available: false`.")
+    else:
+        gpu_here = [s for s in here.get("sizes", []) if str(s).startswith("gpu-")]
+        notes.append(f"- region `{region}`: available, {len(gpu_here)} GPU size(s) offered through the public API.")
+        if gpu_here and size not in gpu_here:
+            notes.append(f"  GPU sizes it does offer: {', '.join(f'`{s}`' for s in gpu_here)}.")
+
+    notes.append(f"- image `{image}`.")
+    return notes, hourly
+
+
 @mcp.tool(title="List managed droplets", annotations=READ_ONLY)
 async def list_droplets() -> str:
     """List every droplet tagged for this project, with state and address."""
@@ -346,6 +462,123 @@ async def droplet_status(droplet: str) -> str:
         else:
             lines += ["", f"📡 State is `{item.get('status')}`; not usable yet."]
         return "\n".join(lines)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(title="Create a GPU droplet", annotations=COSTLY)
+async def create_droplet(
+    name: str,
+    confirm: bool = False,
+    size: Optional[str] = None,
+    region: Optional[str] = None,
+    image: Optional[str] = None,
+    ssh_keys: Optional[str] = None,
+    allow_duplicate: bool = False,
+) -> str:
+    """Create a GPU droplet, tagged so this server can see it. Two steps on purpose.
+
+    THE FIRST CALL ORDERS NOTHING. With confirm=False, which is the default,
+    this reports the size, region, image and keys it would use, what the public
+    catalogue says they cost per hour and per month, and whether the API even
+    offers that size in that region — and then stops. Call it again with
+    confirm=True to place the order. Provisioning an MI300 starts a meter that
+    powering the droplet off does not stop, so the decision gets its own round
+    trip rather than riding along with a typo.
+
+    The tag from DROPLET_TAG is applied unconditionally and is not a parameter.
+    Every other tool here is scoped to that tag, so an untagged droplet would be
+    a machine this server is paying for and cannot reach, start or stop.
+
+    Refuses by default if anything is already tagged for this project: a second
+    GPU droplet doubles the hourly bill and the first one is billed in full even
+    while powered off. Pass allow_duplicate=true when that really is the intent.
+
+    Defaults come from amd.env. A droplet created here is NOT ready for ROCm
+    until it has been rebooted once — see reboot_droplet.
+    """
+    try:
+        wanted = name.strip()
+        if not _NAME_OK.fullmatch(wanted):
+            return (
+                f"❌ `{wanted}` is not a usable droplet name. DigitalOcean allows letters, digits, dots "
+                f"and dashes, and the name can neither start nor end with a dash."
+            )
+        size = (size or DROPLET_SIZE).strip()
+        region = (region or DROPLET_REGION).strip()
+        image = (image or DROPLET_IMAGE).strip()
+        key_ids, key_labels = await _resolve_ssh_keys(DROPLET_SSH_KEYS if ssh_keys is None else ssh_keys)
+
+        existing = await _droplets()
+        clash = [d for d in existing if d.get("name") == wanted]
+        if clash:
+            return (
+                f"❌ `{wanted}` already exists (`{clash[0].get('id')}`, status `{clash[0].get('status')}`) "
+                f"and is already tagged `{DROPLET_TAG}`. Use `start_droplet` on it, or pick another name."
+            )
+        if existing and not allow_duplicate:
+            listed = ", ".join(f"`{d.get('name')}` ({d.get('status')})" for d in existing)
+            return (
+                f"❌ {len(existing)} droplet(s) already tagged `{DROPLET_TAG}`: {listed}.\n\n"
+                f"A second GPU droplet doubles the hourly bill, and the existing one is billed at the "
+                f"full rate even while powered off. Refused by default; pass allow_duplicate=true if a "
+                f"second machine is genuinely wanted."
+            )
+
+        notes, hourly = await _create_preflight(size, region, image)
+        plan = "\n".join(
+            [
+                f"**{wanted}**",
+                "",
+                *notes,
+                f"- ssh keys ({len(key_ids)}): {', '.join(key_labels)}",
+                f"- tag: `{DROPLET_TAG}` — forced, because an untagged droplet is invisible to every tool here",
+            ]
+        )
+
+        if not confirm:
+            cost = (
+                _cost_line(hourly)
+                if hourly
+                else (
+                    "The API cannot price this slug, so nothing here is a quote. The devcloud MI300X "
+                    "billed at $1.99/hour, which is $48/day and $1,433 for 30 days."
+                )
+            )
+            return (
+                f"📡 **Preflight only — nothing has been ordered.**\n\n{plan}\n\n"
+                f"Cost if it is created: {cost}\n\n"
+                f"Billing starts the moment the droplet exists and only destroying it stops the meter; "
+                f"powering it off does not. Call `create_droplet` again with `confirm=true` to order it."
+            )
+
+        body = await _api(
+            "POST",
+            "/droplets",
+            {
+                "name": wanted,
+                "region": region,
+                "size": size,
+                "image": image,
+                "ssh_keys": key_ids,
+                "tags": [DROPLET_TAG],
+                "monitoring": True,
+                "backups": False,
+            },
+            timeout=60,
+        )
+        created = body.get("droplet", {})
+        return (
+            f"✅ Created `{created.get('name')}` (`{created.get('id')}`), status `{created.get('status')}`.\n\n"
+            f"{plan}\n\n"
+            f"📡 There is no public IP until provisioning finishes — poll `droplet_status` and read the "
+            f"address from there rather than reusing an old one.\n\n"
+            f"**Then reboot it once before touching ROCm.** A freshly provisioned MI300 droplet has no "
+            f"`/dev/kfd`: amdgpu fails to bind during provisioning and unloads itself, leaving a card "
+            f"`lspci` can see and nothing can use. `reboot_droplet` is the fix and nothing needs "
+            f"installing.\n\n"
+            f"The meter is running now, and powering the droplet off will not stop it."
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -807,8 +1040,9 @@ async def get_help() -> str:
     lines += [
         "",
         (
-            "No create or destroy tools, by design: both are dollar-per-hour decisions, so they stay "
-            "a deliberate step in the DigitalOcean console."
+            "`create_droplet` orders nothing until it is called a second time with confirm=true, and it "
+            "always applies the tag. There is no destroy tool by design: that one stays a deliberate "
+            "step in the DigitalOcean console."
         ),
         "",
         "Powering a droplet off does not stop DigitalOcean billing it.",
