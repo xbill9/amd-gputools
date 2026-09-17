@@ -1,0 +1,15 @@
+AMD rates int8 and fp8 identically on the MI300X. Measured on the card, int8 ran slower than bf16.
+
+One AMD Instinct MI300X on AMD Developer Cloud, managed entirely through a tag-scoped Python MCP server, with every figure read off the card rather than a spec sheet. fp8 e4m3fnuz runs 1.77x bf16; int8, which AMD rates identically to fp8, runs 0.69x; fp4 is not on this silicon at all. One droplet, $1.99 an hour, and two readings that were wrong the first time.
+
+What is in it:
+
+- fp8 e4m3fnuz is the only format on this card faster than bf16 — 1172.5 against 664.3 TFLOP/s, 1.77x, on an 8192³ matmul.
+- bf16 and fp16 are one pipeline at one peak, 664.3 and 662.5 TFLOP/s, so there is no choice to make between them.
+- int8 is rated 2614.9 TOPS, identical to fp8 and double bf16, and measured 455.6 TFLOP/s. That is 17.4 percent of its own peak and 0.69x bf16.
+- fp4 is not on gfx942. supports\_mx\(\) gates it to gfx950 and gfx1250, and the fallback kernel dequantizes to bf16 on every forward pass.
+
+dev.to \(Google Developer Experts\): https://dev.to/gde/an-mi300x-over-mcp-what-the-matrix-cores-execute-and-what-they-dont-1me9
+Medium: https://xbill999.medium.com/managing-amd-mi300x-deployments-with-mcp-318d0ab116c8
+AMD Developer Community: https://devcommunity.amd.com/t/which-numeric-formats-an-mi300x-actually-executes-measured-on-a-developer-cloud-droplet/1043
+Source: https://github.com/xbill9/amd-gputools
