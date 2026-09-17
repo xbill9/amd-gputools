@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -105,6 +106,9 @@ SETUP_PACKAGES = os.environ.get(
     "SETUP_PACKAGES",
     "ca-certificates curl gnupg git tmux jq pciutils python3-pip docker.io docker-compose rocm-smi rocminfo",
 )
+# Installed from backports. The card does not bind without it: a stock droplet
+# has an empty /lib/firmware/amdgpu. See amd.env.
+BACKPORTS_PACKAGES = os.environ.get("BACKPORTS_PACKAGES", "firmware-amd-graphics")
 VLLM_IMAGE = os.environ.get("VLLM_IMAGE", "vllm/vllm-openai-rocm:nightly-rocm100")
 PULL_LOG = os.environ.get("PULL_LOG", "/var/log/amd-gputools-pull.log")
 
@@ -432,61 +436,28 @@ async def _create_preflight(size: str, region: str, image: str) -> tuple[list[st
     return notes, hourly
 
 
-# Sources are deb822 (/etc/apt/sources.list.d/debian.sources) and their URIs are
-# a DigitalOcean mirror indirection, `mirror+file:///etc/apt/mirrors/debian.list`.
-# So the file is EDITED IN PLACE and never appended to: dropping a classic
-# one-line `deb http://deb.debian.org/debian trixie-backports main` into
-# sources.list.d would bypass the mirror and duplicate a suite that is already
-# enabled. MEASURED 2026-09-17 on droplet 601418522, whose stock `Suites:` line
-# already read `trixie trixie-updates trixie-backports` — BACKPORTS WAS ALREADY
-# ON and only `Components: main` was short. The backports branch below is
-# therefore a fallback for an image that differs, not the normal path.
-#
-# Every step prints rather than failing the script: the interesting droplet is
-# the one where half of this does not apply, and a partial report beats none.
-_PREPARE_SCRIPT = r"""
-say() { printf '<<<%s>>>\n' "$1"; }
-SRC=/etc/apt/sources.list.d/debian.sources
-. /etc/os-release
-CODE="${VERSION_CODENAME:-trixie}"
+def _read_script(name: str) -> str:
+    """Read a remote script from scaffold/, the single source of truth for it.
 
-say before
-if [ -f "$SRC" ]; then grep -E '^(Suites|Components):' "$SRC"; else echo "MISSING $SRC"; fi
+    These scripts are sent to the droplet by this server AND piped there by
+    `scaffold-droplet.sh`. One copy on disk rather than a constant here and a
+    duplicate in the shell script is the point: the two callers cannot drift,
+    and shellcheck lints the exact text this server sends.
+    """
+    return (PROJECT_DIR / "scaffold" / name).read_text()
 
-say sources
-if [ -f "$SRC" ]; then
-  [ -f "$SRC.amd-gputools.bak" ] || cp -a "$SRC" "$SRC.amd-gputools.bak"
-  sed -i "s/^Components:.*/Components: __COMPONENTS__/" "$SRC"
-  grep -q -- "-backports" "$SRC" || sed -i "/^Suites: $CODE /s/\$/ $CODE-backports/" "$SRC"
-  grep -E '^(Suites|Components):' "$SRC"
-else
-  echo "deb822 sources file absent; apt was left alone"
-fi
 
-say update
-apt-get update -qq 2>&1 | tail -6
-echo "exit:$?"
+def _with_env(script: str, **values: str) -> str:
+    """Prepend shell assignments to a script, quoted so a value cannot inject.
 
-say install
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold __PACKAGES__ 2>&1 | tail -10
-echo "exit:$?"
+    The scripts read configuration from the environment so that the shell
+    driver and this server can hand them the same settings under the same
+    names, rather than one of them templating placeholders the other does not
+    know about.
+    """
+    prefix = "".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items() if value)
+    return prefix + script
 
-say docker
-systemctl enable --now docker >/dev/null 2>&1
-printf 'service:%s\n' "$(systemctl is-active docker 2>/dev/null || echo inactive)"
-docker --version 2>/dev/null || echo "docker: absent"
-
-say gids
-printf 'video=%s\nrender=%s\n' "$(getent group video | cut -d: -f3)" "$(getent group render | cut -d: -f3)"
-
-say rocm
-command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showproductname --json 2>/dev/null | head -c 300 || echo "-"
-echo
-command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -cE '^\s*Name:\s*gfx[0-9a-f]+$' || echo "-"
-
-say disk
-df -h --output=avail /var/lib/docker 2>/dev/null | tail -1 || df -h --output=avail / | tail -1
-"""
 
 # The pull is detached on purpose. The ROCm vLLM images are 35-62 GB and a
 # foreground `docker pull` outlives any sane MCP call timeout, which would leave
@@ -517,59 +488,6 @@ pgrep -f "docker pull $IMAGE" >/dev/null 2>&1 && echo yes || echo no
 
 say log
 tail -4 "$LOG" 2>/dev/null | tr '\r' '\n' | tail -4 || echo "(no log)"
-"""
-
-# CLAUDE.md's pre-pull check, run after the fact here because the image is
-# already down. `import vllm.config` comes first or a circular import makes a
-# good image look broken, and /dev/kfd plus /dev/dri have to be mapped in or
-# get_arch_list() returns [] and looks like a build with no kernels for you.
-# The convertor registry's module has moved between vLLM versions, so it is
-# searched for rather than imported from a path that may not exist.
-_GEMMA4_PROBE = r"""
-import json
-
-out = {}
-try:
-    import vllm.config  # noqa: F401  circular-import guard, see CLAUDE.md
-    import vllm
-
-    out["vllm"] = vllm.__version__
-except Exception as exc:
-    out["vllm_error"] = f"{type(exc).__name__}: {exc}"
-
-convertor = "not found"
-for name in (
-    "vllm.transformers_utils.config",
-    "vllm.config",
-    "vllm.transformers_utils.configs",
-    "vllm.model_executor.models.registry",
-):
-    try:
-        mod = __import__(name, fromlist=["MODEL_ARCH_CONFIG_CONVERTORS"])
-    except Exception:
-        continue
-    registry = getattr(mod, "MODEL_ARCH_CONFIG_CONVERTORS", None)
-    if registry is not None:
-        convertor = f"{name}: {registry.get('gemma4')!r}"
-        break
-out["gemma4_convertor"] = convertor
-
-try:
-    import torch
-
-    out["torch"] = torch.__version__
-    out["arch_list"] = torch.cuda.get_arch_list()
-except Exception as exc:
-    out["torch_error"] = f"{type(exc).__name__}: {exc}"
-
-try:
-    import transformers
-
-    out["transformers"] = transformers.__version__
-except Exception as exc:
-    out["transformers_error"] = f"{type(exc).__name__}: {exc}"
-
-print(json.dumps(out, indent=2))
 """
 
 
@@ -1238,7 +1156,12 @@ async def prepare_droplet(droplet: str, pull_image: bool = True, image: Optional
         if why_not:
             return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
 
-        script = _PREPARE_SCRIPT.replace("__COMPONENTS__", APT_COMPONENTS).replace("__PACKAGES__", SETUP_PACKAGES)
+        script = _with_env(
+            _read_script("remote-prepare.sh"),
+            APT_COMPONENTS=APT_COMPONENTS,
+            SETUP_PACKAGES=SETUP_PACKAGES,
+            BACKPORTS_PACKAGES=BACKPORTS_PACKAGES,
+        )
         code, out, err = await run_command(_ssh_argv(ip, script), timeout=900)
         transport = _ssh_transport_error(code, err)
         if transport:
@@ -1381,8 +1304,8 @@ async def _probe_image(ip: str, image: str) -> str:
     # which have no render group of their own.
     runner = (
         "cat > /tmp/gemma4_probe.py <<'PROBE'\n"
-        + _GEMMA4_PROBE
-        + "PROBE\n"
+        + _read_script("gemma4-probe.py")
+        + "\nPROBE\n"
         + "VID=$(getent group video | cut -d: -f3); REN=$(getent group render | cut -d: -f3)\n"
         + "docker run --rm -v /tmp/gemma4_probe.py:/probe.py --device /dev/kfd --device /dev/dri "
         + f'--group-add "$VID" --group-add "$REN" --entrypoint python3 {image} /probe.py 2>&1 | tail -40\n'

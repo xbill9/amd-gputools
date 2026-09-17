@@ -11,6 +11,7 @@ really a broken fake. So `tool()` is a pass-through decorator and the real
 functions survive.
 """
 
+import os
 import sys
 import tempfile
 import unittest
@@ -765,15 +766,18 @@ class PrepareDropletTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_remote_script_edits_in_place_and_never_appends(self):
         """A hand-written `deb` line would bypass the DigitalOcean mirror.
 
-        Asserted against the script constant, not the file: server.py's comment
-        quotes the very line it warns against, so scanning the whole source
-        fails on its own documentation.
+        Comments are stripped before asserting. This check has now been fooled
+        twice by prose quoting the very line it warns against — first in
+        server.py, then in the script that replaced it — which is the same
+        substring-matching mistake as `whiptail` under "ROCm packages". Assert
+        against what runs, not against what the file says.
         """
-        script = server._PREPARE_SCRIPT
-        self.assertIn("sed -i", script)
-        self.assertNotIn(">> /etc/apt/sources.list", script)
-        self.assertNotIn("deb http://deb.debian.org", script)
-        self.assertNotIn("tee /etc/apt/sources.list", script)
+        script = server._read_script("remote-prepare.sh")
+        code = "\n".join(ln for ln in script.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn("sed -i", code)
+        self.assertNotIn(">> /etc/apt/sources.list", code)
+        self.assertNotIn("deb http://deb.debian.org", code)
+        self.assertNotIn("tee /etc/apt/sources.list", code)
 
     async def test_it_backs_the_sources_file_up_once(self):
         source = (PROJECT_DIR / "server.py").read_text()
@@ -842,6 +846,54 @@ class VLLMImageStatusTests(unittest.IsolatedAsyncioTestCase):
         result = await self._status("sha256:abc123 62000000000")
         self.assertIn("62.0 GB", result)
         self.assertNotIn("62000000000", result)
+
+
+class SharedScaffoldScriptTests(unittest.TestCase):
+    """The MCP tool and scaffold-droplet.sh must send the same remote script.
+
+    They were two copies of the same shell for about an hour. One copy on disk,
+    read by both, is the only version of this that stays true.
+    """
+
+    def test_the_remote_script_exists_and_is_executable(self):
+        path = PROJECT_DIR / "scaffold" / "remote-prepare.sh"
+        self.assertTrue(path.is_file(), "scaffold/remote-prepare.sh is missing")
+        self.assertTrue(os.access(path, os.X_OK), "scaffold/remote-prepare.sh is not executable")
+
+    def test_the_driver_pipes_the_same_file_rather_than_a_copy(self):
+        driver = (PROJECT_DIR / "scaffold-droplet.sh").read_text()
+        self.assertIn("scaffold/remote-prepare.sh", driver)
+        # A second copy of the apt edit in the driver is the drift this prevents.
+        self.assertNotIn("Components:", driver, "the driver has its own copy of the sources edit")
+
+    def test_the_script_takes_its_config_from_the_environment(self):
+        script = server._read_script("remote-prepare.sh")
+        self.assertIn("${APT_COMPONENTS:-", script)
+        self.assertIn("${SETUP_PACKAGES:-", script)
+        # Placeholders would mean the shell driver could not run it directly.
+        self.assertNotIn("__COMPONENTS__", script)
+        self.assertNotIn("__PACKAGES__", script)
+
+    def test_env_values_are_quoted_so_they_cannot_inject(self):
+        composed = server._with_env("echo hi\n", APT_COMPONENTS="main; rm -rf /")
+        self.assertIn("'main; rm -rf /'", composed)
+        self.assertTrue(composed.endswith("echo hi\n"))
+
+    def test_empty_values_are_omitted_not_passed_as_blank(self):
+        """A blank assignment would override the script's own default with ''."""
+        composed = server._with_env("body\n", APT_COMPONENTS="", SETUP_PACKAGES="git")
+        self.assertNotIn("APT_COMPONENTS=", composed)
+        self.assertIn("SETUP_PACKAGES=git", composed)
+
+    def test_the_bind_check_is_rocminfo_not_dev_kfd(self):
+        """/dev/kfd survives a failed bind, so it cannot be the gate."""
+        for text in (
+            server._read_script("remote-prepare.sh"),
+            (PROJECT_DIR / "scaffold-droplet.sh").read_text(),
+        ):
+            self.assertIn("gfx[0-9a-f]", text, "the gfx-agent check is missing")
+        driver = (PROJECT_DIR / "scaffold-droplet.sh").read_text()
+        self.assertNotIn("test -e /dev/kfd", driver)
 
 
 class RegistrationTests(unittest.TestCase):

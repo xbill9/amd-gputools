@@ -114,9 +114,26 @@ tool here.
 Verified working 2026-09-16 on the previous droplet: `gfx942`, AMD Instinct MI300X VF,
 304 CUs, 191.7 GiB VRAM, ISA `amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-`.
 
-**`amdgpu` fails to bind the MI300X VF during provisioning, every time so far.** One
-reboot fixes it and nothing needs installing — an hour once went into diagnosing a
-driver stack that was fine.
+**`amdgpu` fails to bind the MI300X VF on a stock droplet, every time so far — and
+"just reboot" is only half of it.** Measured 2026-09-17 on `601418522`, where the
+failure changed shape between boots:
+
+| boot | dmesg | cause |
+| --- | --- | --- |
+| first | `Doesn't get msg:1 from pf, error=-62`, stack through `amdgpu_pci_probe` | PF handshake |
+| after one reboot | `failed to load amdgpu/gc_9_4_3_rlc.bin (-2)`, `early_init of IP block <gfx_v9_4_3> failed -19` | **no firmware installed** |
+| after firmware + reboot | clean | works: `gfx942`, 1 agent, 191.7 GiB |
+
+**`/lib/firmware/amdgpu` is EMPTY on the stock image — 0 files.** `-2` is ENOENT: the
+blobs simply are not there. They ship in **`firmware-amd-graphics`, which lives in
+`non-free-firmware`**, so on a stock droplet the apt component has to be enabled before
+the fix is even installable. That is why `scaffold/remote-prepare.sh` treats the
+components as a prerequisite rather than a convenience, and why it installs the firmware
+from **backports** (`20260810-1~bpo13+1`) rather than trixie's `20250410-2`: gfx942 is
+new enough that the eight-month gap is a real risk. After installing it, 552 blobs.
+
+An earlier version of this file said "nothing needs installing". That was true of the
+previous droplet, which already had the firmware; it is not true of a fresh one.
 
 **What that looks like is not constant, and `/dev/kfd` is a bad test for it.** On
 `601142018` the node was absent. On `601418522` it was **present, with `amdgpu` in
@@ -134,10 +151,31 @@ file read "`/dev/kfd` present, `amdgpu` loaded" off `hardware_scan` and conclude
 reboot was needed; the card had not bound at all.
 
 **The test that works is whether `rocminfo` reports a `gfx` agent.** `hardware_scan`
-now says so directly — it flags a card that is on the PCI bus with zero GPU agents as
-*did not bind* — and that is when `reboot_droplet` is the answer. The benign-looking
-dmesg lines further down are genuinely benign; `Doesn't get msg:1 from pf` is not one
-of them, it is this failure.
+says so directly — it flags a card on the PCI bus with zero GPU agents as *did not
+bind* — and `scaffold/remote-prepare.sh` goes one better by also counting
+`/lib/firmware/amdgpu`, so its verdict distinguishes "no firmware installed" from
+"firmware present, needs a reboot". Those need different fixes and look identical from
+`/dev/kfd`. The benign-looking dmesg lines further down are genuinely benign;
+`Doesn't get msg:1 from pf` and `gc_9_4_3_rlc.bin (-2)` are not, they are the two
+failures above.
+
+### Re-scaffolding: `./scaffold-droplet.sh`
+
+One command takes a bare droplet to ready-to-serve, and it is idempotent, so it doubles
+as a health check:
+
+```
+./scaffold-droplet.sh              # apt, firmware, docker, reboot if needed, pull the image
+./scaffold-droplet.sh --no-pull    # skip the 35-62 GB image
+./scaffold-droplet.sh --probe      # also ask the image whether it can load Gemma 4
+make scaffold                      # the same thing
+```
+
+**The remote half lives in `scaffold/remote-prepare.sh` and the Gemma 4 check in
+`scaffold/gemma4-probe.py`. `server.py` reads those same two files** for the MCP tools
+`prepare_droplet` and `vllm_image_status`, rather than keeping its own copy — they were
+two copies of the same shell for about an hour, which is exactly how the copies drift.
+A test enforces that the driver script does not grow its own version of the apt edit.
 
 **The stock image carries no ROCm userspace at all.** Measured on `601418522`: the
 only tool of the eleven probed that exists is `python3` (3.13.5). `rocm-smi`,
@@ -338,11 +376,24 @@ companion article `~/gemma4-dev/gpu-vllm-mi300x-2b/devto-gemma4-mi300x-mcp.md`, 
 the deployment write-up; `devto-gemma4-mi300x-vllm.md` is the card-and-control-plane
 article and keeps only a prose summary of the finding.
 
-Check before pulling 35-62 GB: run the candidate image's `python3` and print
-`MODEL_ARCH_CONFIG_CONVERTORS.get("gemma4")` plus `torch.cuda.get_arch_list()`. Import
-`vllm.config` first, or a circular-import `ImportError` makes a good image look broken,
-and map `/dev/kfd` and `/dev/dri` in, or `get_arch_list()` returns `[]` and looks like a
-build with no kernels for you.
+Check before pulling 35-62 GB, with `scaffold/gemma4-probe.py` — or after, via
+`vllm_image_status(probe=true)`. Import `vllm.config` first, or a circular-import
+`ImportError` makes a good image look broken, and map `/dev/kfd` and `/dev/dri` in, or
+`get_arch_list()` returns `[]` and looks like a build with no kernels for you.
+
+**The registry is `vllm.transformers_utils.model_arch_config_convertor`.** Worth
+spelling out, because a probe that guessed four other plausible module paths reported
+`gemma4_convertor: not found` against an image carrying ten `gemma4` modules and a
+registered `Gemma4ModelArchConfigConvertor` — a false negative that would have sent
+someone hunting for another 62 GB image. The probe now reports which modules it tried
+alongside the answer, so "did not find it" cannot be mistaken for "this build lacks it".
+
+Measured 2026-09-17 on `vllm/vllm-openai-rocm:nightly-rocm100` as pulled that day:
+**35.1 GB**, vLLM reporting the odd version string `0.3.1.dev3+g0bfc7a15d`, torch
+`2.12.0+rocm10.0.0`, transformers `5.17.0`, 36 convertors registered with `gemma4`
+among them, and `gfx942` present in `get_arch_list()` alongside `gfx950` and `gfx1250`.
+The version string is not the `0.29.1rc1.dev187` recorded earlier for this tag — nightly
+tags move, so read the probe rather than assuming the build.
 
 **The two images take different argv.** `vllm/vllm-openai-rocm` sets
 `ENTRYPOINT ["vllm","serve"]`, so the model id is the first argument; AMD's images have
