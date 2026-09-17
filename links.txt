@@ -1,2 +1,3 @@
 devto-gde = https://dev.to/gde/an-mi300x-over-mcp-what-the-matrix-cores-execute-and-what-they-dont-1me9
 repo = https://github.com/xbill9/amd-gputools
+medium = https://xbill999.medium.com/managing-amd-mi300x-deployments-with-mcp-318d0ab116c8
