@@ -84,6 +84,31 @@ disabled until a key is selected), and expand **"Show details and additional opt
 to reach the Tags field and add **`gemma`**. An untagged droplet is invisible to every
 tool here.
 
+#### Quirks of that form, all measured 2026-09-17 while driving it
+
+- **The Tags field is hidden by default.** It is below "Show details and additional
+  options", past region, VPC, backups, volumes, networking, monitoring and startup
+  scripts. Submitting without expanding that section produces an untagged droplet that
+  every tool in this repo is blind to — the single most expensive mistake available on
+  this page, because you pay for it and cannot see it.
+- **Setting the SSH-key checkbox programmatically does not take.** Assigning `checked`
+  ticks the box visually while the counter stays at `0 / 1` and the submit button stays
+  disabled: React never sees the change. A real click is required, and the counter going
+  to `1 / 1` is the thing to verify, not the tick.
+- **Clicking the submit button by coordinate silently did nothing** — the page went
+  blank and `Page.captureScreenshot` timed out — while clicking the same button by
+  element reference worked immediately. Prefer the element reference.
+- **The credits are time-limited and partial.** The form said $88.40 of AMD GPU credit
+  **expiring 2026-10-15**, and that credit covers GPU access only; everything else on
+  the account bills to the payment method.
+- **The console's name rule is stricter than the API's.** It demands lowercase, 3–45
+  characters, dashes only. `create_droplet` validates against the API rule instead
+  (letters, digits, dots and dashes, no leading or trailing dash), so a name it accepts
+  can still be one the console would have rejected.
+- **Spot is offered in ATL1, MEM1, RIC1 and MKC1.** MKC1 appears nowhere in
+  `GET /v2/regions`, which is another instance of the console knowing about capacity the
+  public API does not.
+
 ### A fresh droplet may or may not need a reboot — check `/dev/kfd`, don't guess
 
 Verified working 2026-09-16 on the previous droplet: `gfx942`, AMD Instinct MI300X VF,
@@ -117,7 +142,25 @@ Once installed, ROCm here is the Debian packaging (`rocm-smi`, `rocminfo` in
 `/usr/bin`, ROCm 6.1.2), not AMD's own repo — there is no `/opt/rocm` and no
 `amdgpu-dkms`. PyTorch is not installed either.
 
-**`rocm-smi` and `amd-smi` exit 0 when they fail.** Measured on this droplet:
+### Two tools here have reported confident, wrong answers
+
+Both were found on 2026-09-17 and both are fixed, but the shape of the mistake is worth
+keeping, because it is the shape this codebase keeps producing: a probe that did not run
+being read as a probe that answered.
+
+- **`gpu_status` diagnosed a machine nothing had spoken to.** Seconds after creation it
+  reported "`/dev/kfd` exists, so the driver is up" about a droplet that was answering
+  `ssh: connect to host … port 22: Connection refused`. The API had called it `active`,
+  which says nothing about sshd; none of the probes had run; and the code treated "not
+  absent" as "present". It now checks whether ssh ran at all before saying anything
+  about the GPU, and the kfd probe answers three ways — present, absent, or unknown.
+  **A droplet reporting `active` is not a droplet you can reach.**
+- **`hardware_scan` filed `whiptail` under "ROCm packages"** on a box with no ROCm,
+  because the awk filter matched a bare `hip` against the whole `dpkg -l` line. It now
+  matches the package name against names that actually exist. Substring matching on
+  three-letter tokens finds things that are not there.
+
+**`rocm-smi` and `amd-smi` exit 0 when they fail.** Measured on the previous droplet:
 `rocm-smi` printed "Driver not initialized" to stderr, printed nothing to stdout, and
 exited 0. Never branch on their exit status — parse the output. `gpu_status` does,
 after an earlier version reported a healthy "✅" with an empty table.
