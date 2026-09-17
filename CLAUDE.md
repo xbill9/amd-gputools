@@ -61,6 +61,12 @@ installed.
 exited 0. Never branch on their exit status — parse the output. `gpu_status` does,
 after an earlier version reported a healthy "✅" with an empty table.
 
+**The VRAM percentage key is `GPU Memory Allocated (VRAM%)`.** Not "GPU Memory Use (%)" or
+any other plausible spelling — measured on ROCM-SMI 2.2.0 here 2026-09-16, while vLLM held
+168.3 GiB of the 191.7 GiB. `gpu_status` printed `-` in that column for hours and the card
+read as idle. The unit test used the invented key too, so it passed against a payload no
+machine emits: fixtures for remote tooling get pasted from the box, never typed from memory.
+
 The devcloud size slug is not in `GET /v2/sizes`, which lists the public
 `gpu-mi300x1-192gb` at $2.59/hr instead. `list_gpu_sizes` shows the public catalogue,
 not what devcloud sells.
