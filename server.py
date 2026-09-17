@@ -284,6 +284,27 @@ async def run_command(cmd: list[str], timeout: int = 120) -> tuple[int, str, str
         return 127, "", f"not found: {cmd[0]}"
 
 
+def _ssh_transport_error(code: int, err: str) -> Optional[str]:
+    """Return ssh's own complaint, or None if ssh actually ran the command.
+
+    ssh exits 255 when it could not run anything at all — connection refused,
+    timed out, host key rejected, no usable key — and writes a line beginning
+    "ssh:" to stderr. Telling that apart from the remote command's own exit
+    status matters because `_reachable` only proves the API calls the droplet
+    `active`, and a freshly created GPU droplet refuses connections for a
+    minute or more after that while sshd comes up. MEASURED 2026-09-17 on
+    601418522, seconds after creation: "ssh: connect to host 129.212.178.87
+    port 22: Connection refused". Without this, gpu_status read an unreachable
+    droplet as a reachable one whose probes happened to say nothing.
+    """
+    text = (err or "").strip()
+    if code == 124:
+        return text or "ssh timed out"
+    if code == 255 and text:
+        return text.splitlines()[0]
+    return None
+
+
 async def _reachable(droplet: dict) -> tuple[Optional[str], Optional[str]]:
     """Return (ip, reason_it_is_not_usable). Exactly one is None."""
     status = droplet.get("status")
@@ -785,10 +806,22 @@ async def gpu_status(droplet: str) -> str:
         if why_not:
             return f"❌ Cannot reach `{item.get('name')}`: {why_not}"
 
-        _, out, err = await run_command(
+        code, out, err = await run_command(
             _ssh_argv(ip, "rocm-smi --showid --showproductname --showuse --showmemuse --json"),
             timeout=90,
         )
+        # Ask whether ssh ran at all before saying anything about the GPU: an
+        # unreachable droplet produces no rocm-smi output and no kfd marker, and
+        # every "no GPU" branch below would then be a guess about a box nothing
+        # has spoken to.
+        transport = _ssh_transport_error(code, err)
+        if transport:
+            return (
+                f"❌ Cannot reach `{item.get('name')}` over SSH at {ip}.\n\n```\n{transport}\n```\n\n"
+                f"This says nothing about the GPU. The API calls a droplet `active` a minute or more "
+                f"before sshd accepts connections, so retry if it was just created or rebooted; if it "
+                f"persists, check the key with `ssh_command`."
+            )
         table = _summarize_rocm_smi(out)
         if table:
             return f"✅ `{item.get('name')}`\n\n{table}"
@@ -805,15 +838,24 @@ async def gpu_status(droplet: str) -> str:
             _ssh_argv(ip, "test -e /dev/kfd && echo kfd:present || echo kfd:absent"),
             timeout=60,
         )
-        kfd_absent = "kfd:absent" in probe
         complaint = (err or out or "").strip() or (err2 or out2 or "").strip() or "(no output)"
-        diagnosis = (
-            "`/dev/kfd` does not exist, so ROCm compute is unavailable on this droplet — the card may be "
-            "visible to `lspci` and still be unusable. The stock amdgpu module does not bring up the "
-            "compute node for an MI300X VF; that needs the ROCm driver stack installed on the droplet."
-            if kfd_absent
-            else "`/dev/kfd` exists, so the driver is up and the fault is in the tooling or its permissions."
-        )
+        # Three answers, not two. Treating "not absent" as "present" turned a
+        # probe that never ran into a confident "the driver is up" — which is
+        # the wrong answer to act on, and the expensive one.
+        if "kfd:absent" in probe:
+            diagnosis = (
+                "`/dev/kfd` does not exist, so ROCm compute is unavailable on this droplet — the card may "
+                "be visible to `lspci` and still be unusable. On a freshly provisioned droplet this is "
+                "normal and the fix is `reboot_droplet`, not installing anything: amdgpu fails to bind the "
+                "MI300X VF during provisioning and unloads itself."
+            )
+        elif "kfd:present" in probe:
+            diagnosis = "`/dev/kfd` exists, so the driver is up and the fault is in the tooling or its permissions."
+        else:
+            diagnosis = (
+                "The `/dev/kfd` probe returned neither answer, so the state of the driver is unknown — "
+                "treat this as an unreachable droplet rather than a broken GPU."
+            )
         return (
             f"❌ No GPU reported on `{item.get('name')}` — and note both tools exited 0 while failing.\n\n"
             f"```\n{complaint[:800]}\n```\n\n{diagnosis}"
@@ -868,7 +910,11 @@ have python3 && python3 --version || echo -
 ls -d /opt/rocm* 2>/dev/null || echo "no /opt/rocm"
 
 say packages
-dpkg -l 2>/dev/null | awk '/amdgpu|rocm|hsa|hip/ {print $2"\t"$3}' | head -25
+# Matched against the package NAME only, and against names that really exist,
+# because a bare "hip" anywhere in the line put `whiptail` under "ROCm packages"
+# on a box with no ROCm at all — measured 2026-09-17 on 601418522. "hsa" and
+# "hip" cannot be used as loose substrings for the same reason.
+dpkg -l 2>/dev/null | awk '$2 ~ /amdgpu|rocm|hsakmt|libhsa|hipcc|libamdhip|hip-runtime|hipblas|hipfft|hiprand|hipsparse|hipsolver|miopen|rccl|comgr/ {print $2"\t"$3}' | head -25
 
 say python
 have python3 && python3 -c "import torch;print('torch',torch.__version__,'hip',getattr(torch.version,'hip',None),'avail',torch.cuda.is_available())" 2>&1 | tail -1 || echo -

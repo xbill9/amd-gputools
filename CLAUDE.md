@@ -27,27 +27,22 @@ Reached through AMD Developer Cloud (`devcloud.amd.com`), which is DigitalOcean
 underneath — same v2 API, same droplet ids. The token comes from the **My AMD Team**
 account, not a personal DigitalOcean one.
 
-**There is no droplet right now.** Checked 2026-09-17: `GET /v2/droplets` returned 0
-for this account, and `GET /v2/droplets/601142018` — the box every measurement below
-was taken on — returned 404. It was destroyed, not powered off, so the meter is
-stopped. Every tool here is tag-scoped, so they all answer "no droplets tagged
-`gemma`" until a replacement exists and carries that tag.
-
-The shape to rebuild, and what the numbers below were measured on:
-
 | | |
 | --- | --- |
-| name | `debian-gpu-mi300x1-192gb-devcloud-atl1` (id `601142018`, **gone**) |
+| name | `debian-gpu-mi300x1-192gb-devcloud-atl1` |
+| id | `601418522` — **the third id this box has had; never hardcode one** |
 | tag | **`gemma`** — this is what `DROPLET_TAG` must be, not `amd-gputools` |
 | size | `gpu-mi300x1-192gb-devcloud` — 1× MI300X, 192 GiB VRAM, 20 vCPU, 240 GB RAM |
 | region | `atl1` |
-| cost | **$1.99/hour** — $48/day, $1,433 for 30 days |
-| OS | Debian 13 (trixie), kernel 6.12.94+deb13-amd64 |
+| cost | **$1.99/hour** — $48/day, $1,433 for 30 days, running now |
+| OS | Debian 13 (trixie), kernel 6.12.94+deb13-amd64, Xeon Platinum 8568Y+ |
 
-Those are the defaults `create_droplet` uses, and they live in `amd.env`
-(`DROPLET_SIZE`, `DROPLET_REGION`, `DROPLET_IMAGE`, `DROPLET_SSH_KEYS`). Verified
-2026-09-16. Re-read the id and the address rather than trusting this table — a
-rebuilt droplet gets new ones.
+Created 2026-09-17, replacing id `601142018`, which was **destroyed** — not powered
+off — some time before that date. The old id returned 404 and the account held zero
+droplets. Those are also the defaults `create_droplet` uses, and they live in
+`amd.env` (`DROPLET_SIZE`, `DROPLET_REGION`, `DROPLET_IMAGE`, `DROPLET_SSH_KEYS`).
+Re-read the id and the address rather than trusting this table — every rebuild
+changes both.
 
 ### Creating one
 
@@ -59,33 +54,68 @@ untagged droplet would be a machine this server pays for and cannot reach — an
 refuses by default if anything is already tagged, because a second GPU droplet doubles
 the hourly bill.
 
-**The API may not be able to sell you this card.** The devcloud slug is not in
-`GET /v2/sizes`, and `atl1` is not one of the regions the public API offers a GPU size
-in: checked 2026-09-17, `GET /v2/regions` listed GPU sizes only in `nyc2`, `tor1`,
-`ric1` and `mem1`, and the public `gpu-mi300x1-192gb` listed no regions at all. The
-preflight says so rather than guessing. If the order is refused, create it in the
-devcloud console and tag it `gemma` there — nothing else in this repo cares which route
-it came by.
+**The v2 API cannot sell you this card, and that is settled, not suspected.**
+`POST /v2/droplets` with the devcloud slug returns **`422: This size is unavailable`**
+— measured 2026-09-17. It is not a token, tag or region typo: no MI300X is orderable
+through the public API at all. `gpu-mi300x1-192gb` and `gpu-mi300x8-1536gb` are both
+`available: true` with an **empty `regions` list**, and across every available region
+there are exactly six orderable GPU size/region pairs, none of them MI300 (`mi325x1` in
+nyc2/tor1 at $3.80/hr, `mi350x1-spot` in ric1, `mi355x1-spot` in mem1, plus the x8
+variants).
 
-### The GPU works — but a freshly provisioned droplet needs one reboot
+**The console allocates from a fleet the API has no field for.** The devcloud create URL
+carries `fleetUuid=28e7a619-ddf9-4ef8-99bc-46b38b871fe7` (which is also the "My AMD
+Home" project id), and there is no fleet route on `api.digitalocean.com` — `/v2/gpus`,
+`/v2/gpus/fleets`, `/v2/fleets` and every variant tried return `not_found: Your request
+could not be routed`. So the asymmetry is in the **create path only**: once the droplet
+exists it is an ordinary v2 droplet that `list_droplets`, `start_droplet` and the rest
+drive normally.
 
-Verified working 2026-09-16: `gfx942`, AMD Instinct MI300X VF, 304 CUs, 191.7 GiB
-VRAM, ISA `amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-`.
+So `create_droplet` is the preflight and the audit trail, not the way this box gets
+built. Build it at:
 
-**On a fresh droplet `/dev/kfd` is missing until you reboot once.** Before the
-reboot `lspci` shows the card and `/dev/dri/renderD128` exists, but `amdgpu` has
-already failed to bind and unloaded, so no ROCm process can use it. Nothing needs
-installing — Debian's in-tree `amdgpu` plus the ROCm 6.1.2 userspace already on the
-image are enough. Reboot, don't debug: an hour went into diagnosing a driver stack
-that was fine.
+```
+https://devcloud.amd.com/gpus/new?i=95798a&region=atl1&size=gpu-mi300x1-192gb-devcloud&fleetUuid=28e7a619-ddf9-4ef8-99bc-46b38b871fe7&options=install_agent&distroImage=debian-13-x64&distro=debian
+```
+
+That prefills plan, region, image and hostname. Three things still have to be set by
+hand, and the tag is the one that matters: tick the **`amd` SSH key** (the button stays
+disabled until a key is selected), and expand **"Show details and additional options"**
+to reach the Tags field and add **`gemma`**. An untagged droplet is invisible to every
+tool here.
+
+### A fresh droplet may or may not need a reboot — check `/dev/kfd`, don't guess
+
+Verified working 2026-09-16 on the previous droplet: `gfx942`, AMD Instinct MI300X VF,
+304 CUs, 191.7 GiB VRAM, ISA `amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-`.
+
+**The missing-`/dev/kfd` condition is real but not universal.** On droplet `601142018`
+it was absent after provisioning: `lspci` showed the card and `/dev/dri/renderD128`
+existed, but `amdgpu` had failed to bind and unloaded, so no ROCm process could use it.
+One reboot fixed it and nothing needed installing — an hour went into diagnosing a
+driver stack that was fine. **On `601418522`, two minutes after creation, `/dev/kfd` was
+already present and `amdgpu` was loaded.** Same size, same region, same image.
+
+So the rule is check, then act: `hardware_scan` reports `/dev/kfd` in its GPU section,
+and `reboot_droplet` is the fix only when it says **ABSENT**. Rebooting reflexively
+costs a few minutes of a $1.99/hour machine for nothing.
+
+**The stock image carries no ROCm userspace at all.** Measured on `601418522`: the
+only tool of the eleven probed that exists is `python3` (3.13.5). `rocm-smi`,
+`rocminfo`, `amd-smi`, `hipcc`, `clinfo`, `docker`, `podman`, `pip3`, `git` and `tmux`
+are all absent, there is no `/opt/rocm`, and `dpkg` lists no ROCm packages. The kernel
+side is complete and the userspace is empty. The `rocm-smi` and `rocminfo` in
+`/usr/bin` on the old droplet were therefore **installed at some point, not shipped**,
+so `gpu_status` returns "command not found" on a brand-new box and that is the image,
+not a fault. Docker has to be installed before `vllm/docker-serve.sh` can run.
 
 These dmesg lines are benign on a VF and are not the problem: `failed to load
 amdgpu/psp_13_0_6_cap.bin (-2)`, `Unsupported TA type: 8`, `TMZ feature not
 supported`.
 
-ROCm is the Debian packaging (`rocm-smi`, `rocminfo` in `/usr/bin`, ROCm 6.1.2), not
-AMD's own repo — there is no `/opt/rocm` and no `amdgpu-dkms`. PyTorch is not
-installed.
+Once installed, ROCm here is the Debian packaging (`rocm-smi`, `rocminfo` in
+`/usr/bin`, ROCm 6.1.2), not AMD's own repo — there is no `/opt/rocm` and no
+`amdgpu-dkms`. PyTorch is not installed either.
 
 **`rocm-smi` and `amd-smi` exit 0 when they fail.** Measured on this droplet:
 `rocm-smi` printed "Driver not initialized" to stderr, printed nothing to stdout, and

@@ -573,6 +573,77 @@ class NoDestroyToolTests(unittest.TestCase):
             self.assertNotIn('"destroy"', stripped, f"a destroy action appeared in server.py: {stripped[:120]}")
 
 
+class SSHTransportErrorTests(unittest.TestCase):
+    """ssh failing to connect is not a statement about the GPU.
+
+    Measured 2026-09-17 on droplet 601418522, seconds after it was created:
+    gpu_status reported "`/dev/kfd` exists, so the driver is up" about a box
+    that was refusing connections on port 22. The droplet was `active` in the
+    API, none of the probes had run, and "not absent" was being read as
+    "present" — a confident diagnosis of a machine nothing had spoken to.
+    """
+
+    def test_connection_refused_is_recognised(self):
+        err = "ssh: connect to host 129.212.178.87 port 22: Connection refused"
+        self.assertEqual(server._ssh_transport_error(255, err), err)
+
+    def test_timeout_is_recognised(self):
+        self.assertIn("timed out", server._ssh_transport_error(124, "timed out after 90s"))
+
+    def test_a_remote_command_failing_is_not_a_transport_error(self):
+        """rocm-smi exiting non-zero must still reach the GPU diagnosis."""
+        self.assertIsNone(server._ssh_transport_error(127, "bash: line 1: rocm-smi: command not found"))
+        self.assertIsNone(server._ssh_transport_error(0, ""))
+        self.assertIsNone(server._ssh_transport_error(1, "Driver not initialized"))
+
+
+class GPUStatusUnreachableTests(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, responses):
+        async def fake_run_command(cmd, timeout=120):
+            return responses.pop(0)
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                return await server.gpu_status("mi300-1")
+
+    async def test_refused_ssh_does_not_become_a_gpu_diagnosis(self):
+        result = await self._run([(255, "", "ssh: connect to host 203.0.113.7 port 22: Connection refused")])
+        self.assertTrue(result.startswith("❌"), result)
+        self.assertIn("Cannot reach", result)
+        self.assertIn("says nothing about the GPU", result)
+        self.assertNotIn("driver is up", result)
+
+    async def test_a_silent_kfd_probe_is_unknown_not_present(self):
+        """Neither marker came back, so the driver state is not known."""
+        result = await self._run([(0, "not json", ""), (0, "ERROR: no devices", ""), (0, "", "")])
+        self.assertIn("neither answer", result)
+        self.assertNotIn("driver is up", result)
+
+    async def test_absent_kfd_names_the_reboot_fix(self):
+        result = await self._run([(0, "not json", ""), (0, "ERROR: no devices", ""), (0, "kfd:absent\n", "")])
+        self.assertIn("reboot_droplet", result)
+
+
+class ScanPackageFilterTests(unittest.IsolatedAsyncioTestCase):
+    """`whiptail` contains "hip"; it is not a ROCm package."""
+
+    async def test_whiptail_is_not_a_rocm_package(self):
+        scan = HardwareScanTests.SCAN.replace("<<<packages>>>\nrocm-smi\t6.1.2-1\n", "<<<packages>>>\n")
+
+        async def fake_run_command(cmd, timeout=120):
+            return (0, scan, "")
+
+        with patch.object(server, "_resolve", AsyncMock(return_value=ACTIVE)):
+            with patch.object(server, "run_command", fake_run_command):
+                result = await server.hardware_scan("mi300-1")
+        self.assertIn("ROCm packages (0)", result)
+
+    def test_the_awk_filter_matches_names_not_the_whole_line(self):
+        source = (PROJECT_DIR / "server.py").read_text()
+        self.assertIn("$2 ~ /amdgpu|rocm", source, "the package filter must match the name field")
+        self.assertNotIn("awk '/amdgpu|rocm|hsa|hip/", source, "a bare `hip` substring matches whiptail")
+
+
 class RegistrationTests(unittest.TestCase):
     """The server key prefixes every tool name, so the four places must agree."""
 
