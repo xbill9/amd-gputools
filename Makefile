@@ -2,7 +2,7 @@
 
 PYTHON ?= python3
 
-.PHONY: help install lint test check ssh sync scaffold
+.PHONY: help install lint test check clean ssh sync scaffold
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t22
@@ -30,3 +30,8 @@ test:  ## Run the offline unit tests — unittest, never pytest
 	$(PYTHON) -m unittest discover -s tests -v
 
 check: lint test  ## What CI would run
+
+clean:  ## Delete the python and ruff caches (never .env, never run/)
+	find . -name __pycache__ -type d -prune -exec rm -rf {} +
+	find . -name '*.py[cod]' -delete
+	rm -rf .ruff_cache
