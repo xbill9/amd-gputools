@@ -16,7 +16,11 @@
 target-version = "py313"
 line-length = 120
 
-extend-exclude = [".claude/skills", "dist"]
+# *.md is excluded because ruff 0.16 formats python fenced blocks inside
+# markdown, and the articles in this tree are published prose: their blocks are
+# quoted excerpts of vLLM and torch internals, not this repo's code. Letting the
+# formatter rewrite them would make the file diverge from what is live on dev.to.
+extend-exclude = [".claude/skills", "dist", "*.md"]
 
 [lint]
 select = ["E4", "E7", "E9", "F", "I", "B", "ISC"]
