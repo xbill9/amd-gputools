@@ -255,6 +255,34 @@ Each of these came out of a specific failure:
 - **Annotate write and destructive tools.** `READ_ONLY`, `WRITE`, `DESTRUCTIVE` — so a client can gate the ones that cost money or kill a running job.
 - **Tests run offline.** The whole `mcp` package is mocked before `server` is imported, so no test needs a token or a network.
 
+#### Why Not the Official DigitalOcean MCP Server?
+
+DigitalOcean ships one. `@digitalocean/mcp` is at 1.0.70 on npm, there is a hosted endpoint at `https://droplets.mcp.digitalocean.com/mcp` that needs no local process at all, and the droplet area alone exposes 40 tools across 24 service areas. Seven of the twelve tools here have a direct equivalent in it.
+
+| this server | official |
+| --- | --- |
+| `list_droplets` | `droplet-list` |
+| `droplet_status` | `droplet-get` |
+| `start_droplet` | `power-on-droplet` |
+| `stop_droplet` | `power-off-droplet` |
+| `reboot_droplet` | `droplet-reboot` |
+| `action_status` | `droplet-action` |
+| `list_gpu_sizes` | `size-list` |
+| `ssh_command` | — |
+| `run_on_droplet` | — |
+| `gpu_status` | — |
+| `hardware_scan` | — |
+
+The four with no equivalent are the four that produced every measurement in this article. **The official server is a DigitalOcean API client, and the DigitalOcean API stops at the droplet object.** Searching its repository for `ssh`, `exec`, `console`, `command` or `remote` returns nothing in the tree.
+
+Worked Example 3 is the clearest case. On a freshly provisioned droplet the v2 API reports `status: active` while the card is unusable, because `amdgpu` failed to bind the VF and unloaded, so `/dev/kfd` does not exist. `droplet-get` returns a healthy droplet in both states, because the difference is not in the droplet object.
+
+The size catalogue lands the same way. `size-list` reads `GET /v2/sizes`, which carries `gpu-mi300x1-192gb` at $2.59/hr and does not carry `gpu-mi300x1-192gb-devcloud` at all. Asked what this droplet costs, it has the wrong row available and the right one missing.
+
+One difference is a design choice rather than a gap. The official server has `droplet-create`, `droplet-delete`, and tag-based bulk actions including `power-off-droplets-tag`, so a tag there is a selector for acting on many droplets at once. Here a tag is a boundary: every lookup is scoped by `tag_name`, and an untagged droplet is not addressable by any tool in the server. Both are right for what they are for. One manages a fleet; this one manages a single card that bills at $1.99 an hour with a model resident in 168 GiB of its memory.
+
+**The two compose rather than compete.** The account, the images, the volumes and the fleet belong to the official server, and there is no reason to reimplement any of it. What is worth writing yourself is the part past the API: remote execution, GPU state, and a hardware inventory that answers what the box can run rather than what it is billed as.
+
 #### What The Silicon Will Actually Compute
 
 The control plane exists to report what the box is. The most consequential thing it reports is not capacity — it is **which numeric formats the matrix cores execute natively**, because that decides every quantization choice made afterwards, and it is the question a spec sheet answers least reliably.

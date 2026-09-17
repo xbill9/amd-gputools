@@ -71,6 +71,30 @@ The devcloud size slug is not in `GET /v2/sizes`, which lists the public
 `gpu-mi300x1-192gb` at $2.59/hr instead. `list_gpu_sizes` shows the public catalogue,
 not what devcloud sells.
 
+## DigitalOcean ships its own MCP server, and it does not replace this one
+
+`@digitalocean/mcp` (1.0.70 on npm, checked 2026-09-16) and the hosted endpoint at
+`https://droplets.mcp.digitalocean.com/mcp` expose 40 droplet tools across 24 service
+areas. Seven of this server's twelve have a direct equivalent there: `droplet-list`,
+`droplet-get`, `power-on-droplet`, `power-off-droplet`, `droplet-reboot`, `droplet-action`
+and `size-list`.
+
+**It is an API client, so it stops at the droplet object.** The repo tree has no `ssh`,
+`exec`, `console`, `command` or `remote` tooling of any kind, which leaves `ssh_command`,
+`run_on_droplet`, `gpu_status` and `hardware_scan` with no equivalent — and those are the
+four that see inside the guest. `droplet-get` reports `active` on a fresh droplet whose
+`amdgpu` has failed to bind and has no `/dev/kfd`, because that difference is not in the
+droplet object. Its `size-list` reads the same `GET /v2/sizes` that omits the devcloud
+slug, so it quotes $2.59 for a $1.99 card.
+
+Two design differences are deliberate here and should stay that way. The official server
+has `droplet-create` and `droplet-delete`; this one has neither. And a tag there is a
+selector for bulk actions (`power-off-droplets-tag`); here it is a boundary, so an
+untagged droplet is not addressable at all.
+
+Do not reimplement the account, image, volume or fleet tools. If those are needed, add the
+official server alongside this one.
+
 ## Commands
 
 - `make lint` — `ruff format --check .` then `ruff check .`

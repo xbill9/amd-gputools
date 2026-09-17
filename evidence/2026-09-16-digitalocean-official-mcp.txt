@@ -1,0 +1,34 @@
+Captured 2026-09-16 from npm, the DigitalOcean hosted MCP endpoint, and the
+digitalocean-labs/mcp-digitalocean repository. No API token was sent to any of them.
+
+--- npm view @digitalocean/mcp ---
+version = '1.0.70'
+description = 'DigitalOcean MCP Implementation,'
+homepage = 'https://github.com/digitalocean-labs/mcp-digitalocean'
+last 5 published versions: ['1.0.66', '1.0.67', '1.0.68', '1.0.69', '1.0.70']
+
+--- hosted endpoint, unauthenticated ---
+https://droplets.mcp.digitalocean.com/mcp -> HTTP 401
+body: missing or invalid bearer token
+
+--- pkg/registry/* areas (24) ---
+account, apps, common, dbaas, dedicated-inference, docr, docs, doks, droplet,
+functions, genai, genai-batchinference, genai-custom-models, genai-inferencerouter,
+inference-modelcatalog, insights, marketplace, networking, nfs, spaces, vectordb,
+volumes  (plus registry.go and two test files in the same directory)
+
+--- pkg/registry/droplet/README.md, all 40 tool names ---
+change-kernel-droplet disable-backups-droplet disable-backups-droplets-tag
+droplet-action droplet-create droplet-delete droplet-get droplet-list droplet-reboot
+enable-backups-droplet enable-backups-droplets-tag enable-ipv6-droplet
+enable-ipv6-droplets-tag enable-private-net-droplet enable-private-net-droplets-tag
+image-action-convert image-action-get image-action-transfer image-create image-delete
+image-get image-list image-update power-cycle-droplet power-cycle-droplets-tag
+power-off-droplet power-off-droplets-tag power-on-droplet power-on-droplets-tag
+rebuild-droplet rebuild-droplet-by-slug rename-droplet reset-droplet-password
+resize-droplet restore-droplet shutdown-droplet shutdown-droplets-tag size-list
+snapshot-droplet snapshot-droplets-tag
+
+--- search of the full repo tree (353 paths) for remote execution ---
+keys searched: ssh, exec, console, command, remote
+result: none in the tree
