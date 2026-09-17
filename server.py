@@ -51,6 +51,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 PROJECT_DIR = Path(__file__).resolve().parent
+# .env before amd.env, and both after the real environment: load_dotenv never
+# overwrites a name that is already set, so an exported variable still wins.
+# amd.env is committed and holds no secrets; .env is gitignored and mode 0600.
+load_dotenv(PROJECT_DIR / ".env")
 load_dotenv(PROJECT_DIR / "amd.env")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -75,6 +79,11 @@ SSH_KEY = os.environ.get("SSH_KEY", "")
 SSH_PORT = os.environ.get("SSH_PORT", "22")
 REMOTE_WORKDIR = os.environ.get("REMOTE_WORKDIR", "/opt/amd-gputools")
 
+# Last-resort token file, matching ssh-droplet.sh so the shell script and the
+# server never disagree about where the token lives. A module constant rather
+# than an inline path so tests can point it somewhere that does not exist.
+OCEAN_TXT = Path.home() / "ocean.txt"
+
 mcp = MCPServer(MCP_SERVER_NAME)
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
 WRITE = ToolAnnotations(destructiveHint=False)
@@ -92,15 +101,31 @@ def _token() -> str:
     """Read the API token, preferring the name doctl and Terraform use.
 
     The token is never read from amd.env — that file is committed. It comes
-    from the environment or from .env, which is gitignored and mode 0600.
+    from the environment, from .env (gitignored, mode 0600, loaded at import),
+    or from ~/ocean.txt, which is the same order ssh-droplet.sh uses.
     """
     token = os.environ.get("DIGITALOCEAN_ACCESS_TOKEN") or os.environ.get("DIGITALOCEAN_TOKEN")
     if not token:
+        token = _token_from_ocean_txt()
+    if not token:
         raise RuntimeError(
             "DIGITALOCEAN_ACCESS_TOKEN is unset. Put it in `.env` (gitignored, mode 0600) "
-            "or export it — never in `amd.env`, which is committed."
+            f"or {OCEAN_TXT}, or export it — never in `amd.env`, which is committed."
         )
     return token
+
+
+def _token_from_ocean_txt() -> str:
+    """Return the first line of ~/ocean.txt, or "" if it is unreadable.
+
+    Unreadable is not an error: the file is a fallback, and the caller already
+    raises a message naming every place the token is allowed to live.
+    """
+    try:
+        first = OCEAN_TXT.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    return first.strip()
 
 
 async def _api(method: str, path: str, payload: Optional[dict] = None, timeout: int = 30) -> dict:

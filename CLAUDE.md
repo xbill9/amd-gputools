@@ -84,8 +84,10 @@ work in your shell and fail in the client. Add new dependencies to
 
 `amd.env` is the source of truth for configuration. It is committed on purpose and
 must never be gitignored. **It holds no secrets.** The DigitalOcean token is
-`DIGITALOCEAN_ACCESS_TOKEN` in the environment or in `.env` (gitignored, mode 0600).
-A real environment variable always wins over `amd.env`.
+`DIGITALOCEAN_ACCESS_TOKEN` in the environment, then `.env` (gitignored, mode 0600),
+then `~/ocean.txt` — the same order in `server.py` and `ssh-droplet.sh`, so a token
+that works for one works for the other. A real environment variable always wins
+over `amd.env`.
 
 ## MCP server conventions
 

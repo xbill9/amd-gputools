@@ -12,6 +12,7 @@ functions survive.
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -64,19 +65,73 @@ class TokenTests(unittest.TestCase):
     """The token is read from the environment, never from the committed amd.env."""
 
     def test_missing_token_names_the_right_file(self):
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), self._no_ocean_txt():
             with self.assertRaises(RuntimeError) as ctx:
                 server._token()
         message = str(ctx.exception)
         self.assertIn("DIGITALOCEAN_ACCESS_TOKEN", message)
         # The remediation must not send anyone to the committed file.
         self.assertIn(".env", message)
+        self.assertIn("ocean.txt", message)
         self.assertIn("never in `amd.env`", message)
 
     def test_either_env_var_works(self):
         for name in ("DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"):
             with patch.dict("os.environ", {name: "dop_v1_x"}, clear=True):
                 self.assertEqual(server._token(), "dop_v1_x")
+
+    def test_ocean_txt_is_the_last_resort(self):
+        """With nothing in the environment, ~/ocean.txt still yields a token.
+
+        ssh-droplet.sh has always read it. Before this fallback existed the
+        shell script worked and every MCP tool returned "token is unset".
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            ocean = Path(tmp) / "ocean.txt"
+            ocean.write_text("dop_v1_from_file\n")
+            with patch.dict("os.environ", {}, clear=True):
+                with patch.object(server, "OCEAN_TXT", ocean):
+                    self.assertEqual(server._token(), "dop_v1_from_file")
+
+    def test_environment_beats_ocean_txt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ocean = Path(tmp) / "ocean.txt"
+            ocean.write_text("dop_v1_stale\n")
+            with patch.dict("os.environ", {"DIGITALOCEAN_ACCESS_TOKEN": "dop_v1_live"}, clear=True):
+                with patch.object(server, "OCEAN_TXT", ocean):
+                    self.assertEqual(server._token(), "dop_v1_live")
+
+    def test_empty_ocean_txt_is_not_a_token(self):
+        """An empty or blank file must raise, not return "" as a valid token."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ocean = Path(tmp) / "ocean.txt"
+            ocean.write_text("\n")
+            with patch.dict("os.environ", {}, clear=True):
+                with patch.object(server, "OCEAN_TXT", ocean):
+                    with self.assertRaises(RuntimeError):
+                        server._token()
+
+    def test_dotenv_is_loaded_before_amd_env(self):
+        """.env must be loaded too, or its token never reaches the process.
+
+        The error message told people to put the token in .env while the server
+        only ever loaded amd.env, so following the instructions changed nothing.
+        """
+        source = (PROJECT_DIR / "server.py").read_text()
+        self.assertIn('load_dotenv(PROJECT_DIR / ".env")', source)
+        self.assertLess(
+            source.index('load_dotenv(PROJECT_DIR / ".env")'),
+            source.index('load_dotenv(PROJECT_DIR / "amd.env")'),
+        )
+
+    def test_dotenv_is_gitignored(self):
+        """.env holds the live token; git must never be able to see it."""
+        ignored = (PROJECT_DIR / ".gitignore").read_text().splitlines()
+        self.assertIn(".env", [line.strip() for line in ignored])
+
+    @staticmethod
+    def _no_ocean_txt():
+        return patch.object(server, "OCEAN_TXT", Path("/nonexistent/ocean.txt"))
 
     def test_amd_env_carries_no_secret(self):
         """amd.env is committed, so a token appearing in it is a leak."""
