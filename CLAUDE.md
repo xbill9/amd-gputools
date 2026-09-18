@@ -30,14 +30,15 @@ account, not a personal DigitalOcean one.
 | | |
 | --- | --- |
 | name | `debian-gpu-mi300x1-192gb-devcloud-atl1` |
-| id | `601418522` — **the third id this box has had; never hardcode one** |
+| id | `601744248` — **the fourth id this box has had; never hardcode one** |
 | tag | **`gemma`** — this is what `DROPLET_TAG` must be, not `amd-gputools` |
 | size | `gpu-mi300x1-192gb-devcloud` — 1× MI300X, 192 GiB VRAM, 20 vCPU, 240 GB RAM |
 | region | `atl1` |
 | cost | **$1.99/hour** — $48/day, $1,433 for 30 days, running now |
 | OS | Debian 13 (trixie), kernel 6.12.94+deb13-amd64, Xeon Platinum 8568Y+ |
 
-Created 2026-09-17, replacing id `601142018`, which was **destroyed** — not powered
+Created 2026-09-18, replacing `601418522` (itself created 2026-09-17), which was gone by then
+like its predecessor. `601418522` replaced id `601142018`, which was **destroyed** — not powered
 off — some time before that date. The old id returned 404 and the account held zero
 droplets. Those are also the defaults `create_droplet` uses, and they live in
 `amd.env` (`DROPLET_SIZE`, `DROPLET_REGION`, `DROPLET_IMAGE`, `DROPLET_SSH_KEYS`).
@@ -98,6 +99,12 @@ tool here.
 - **Clicking the submit button by coordinate silently did nothing** — the page went
   blank and `Page.captureScreenshot` timed out — while clicking the same button by
   element reference worked immediately. Prefer the element reference.
+- **The first click on "Create GPU Droplet" after adding a tag can do nothing.** Measured
+  2026-09-18: a click by element reference, right after typing the tag and pressing Enter,
+  left the URL unchanged, raised no error, and the account held zero droplets 20 seconds
+  later. The identical second click created it at once. **Confirm the account is empty
+  through the API before clicking again**, because a second click that does work orders a
+  second $1.99/hour droplet.
 - **The credits are time-limited and partial.** The form said $88.40 of AMD GPU credit
   **expiring 2026-10-15**, and that credit covers GPU access only; everything else on
   the account bills to the payment method.
@@ -433,6 +440,18 @@ are depressed and the ratios are the result.
 | fp16 | 662.5 | 50.7% | 1.00x |
 | **fp8 `e4m3fnuz`** | **1172.5** | 44.8% | **1.77x** |
 | int8 | 455.6 | 17.4% | **0.69x** |
+
+**8192³ is not what decode runs — see the rerun at decode shapes, 2026-09-18.** Summed over Gemma 4
+E2B's linear layers at M = 1–64 and replayed from a HIP graph, fp8 is **1.50x** bf16, ranging per
+shape from 0.86x (fp8 slower) to 1.81x; int8 **refuses M ≤ 16** and is 0.20x at M = 64; and this
+table's own 8192³ int8 figure reran at 0.40x, not 0.69x. Full write-up in
+`~/gemma4-dev/gpu-vllm-mi300x-2b/benchmarks/runs/2026-09-18-gemm-decode-shapes-mi300x/REPORT.md`,
+chip-level summary in `~/gemma4-dev/HARDWARE.md`.
+
+**End to end, fp8 serving is slower than bf16 — 0.53x–0.80x output throughput** (vLLM 0.19.1,
+2026-09-18), and `--quantization fp8` does not start at all on `nightly-rocm100` (both quant paths
+fail on `e4m3fnuz`). Serve bf16. Details in
+`~/gemma4-dev/gpu-vllm-mi300x-2b/benchmarks/runs/2026-09-18-vllm-sweep-mi300x-v0191-fp8/REPORT.md`.
 
 - **bf16 is the baseline and fp16 is not a change.** Both go through the same CDNA 3 matrix cores
   at the same 1307.4 TFLOP/s peak. Gemma 4's config says `dtype: bfloat16` and the engine confirms
